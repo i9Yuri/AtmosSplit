@@ -105,11 +105,13 @@ class RoomView714(QWidget):
 
     def set_stems_and_placements(self, stems: List[StemTrack], placements: Dict[str, SpatialPlacement]):
         """Atualiza a lista de instrumentos e seus posicionamentos espaciais."""
-        self.stems = {s.name: s for s in stems}
-        self._stem_colors = {s.name: QColor(s.color_hex) for s in stems}
+        base_stems = {s.name: s for s in stems}
+        self.stems = {name: base_stems[plc.source_stem_name or name] for name, plc in placements.items()
+                      if (plc.source_stem_name or name) in base_stems}
+        self._stem_colors = {name: QColor(stem.color_hex) for name, stem in self.stems.items()}
         self.placements = placements
-        if stems and (self.active_stem_name not in self.stems):
-            self.active_stem_name = stems[0].name
+        if self.stems and (self.active_stem_name not in self.stems):
+            self.active_stem_name = next(iter(self.stems))
         self._update_rays_cache()
         self.update()
 

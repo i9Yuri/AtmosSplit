@@ -27,6 +27,7 @@ class StemControlCard(QFrame):
     """Card de controle direto para um instrumento individual."""
     changed = Signal(str)  # Emite o stem_name quando qualquer parâmetro mudar
     selected = Signal(str)
+    delete_requested = Signal(str)
 
     def __init__(self, stem: StemTrack, placement: SpatialPlacement, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -95,7 +96,7 @@ class StemControlCard(QFrame):
         header_layout.addWidget(dot)
 
         # Nome
-        self.lbl_title = QLabel(self.stem.display_name)
+        self.lbl_title = QLabel(self.stem.display_name if self.placement.source_stem_name in (None, self.stem.name) else f"{self.stem.display_name} · cópia")
         self.lbl_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #FFFFFF;")
         header_layout.addWidget(self.lbl_title, stretch=1)
 
@@ -124,6 +125,12 @@ class StemControlCard(QFrame):
         self.btn_mute.setChecked(self.placement.is_muted)
         self.btn_mute.clicked.connect(self._on_mute_toggle)
         header_layout.addWidget(self.btn_mute)
+        if self.placement.source_stem_name not in (None, self.stem.name):
+            self.btn_delete = QPushButton("×")
+            self.btn_delete.setFixedWidth(24)
+            self.btn_delete.setToolTip("Excluir esta instância clonada")
+            self.btn_delete.clicked.connect(lambda: self.delete_requested.emit(self.placement.stem_name))
+            header_layout.addWidget(self.btn_delete)
 
         layout.addLayout(header_layout)
 

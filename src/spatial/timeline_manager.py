@@ -99,12 +99,12 @@ class SpatialTimelineManager:
         Divide a seção que contém split_time_s em duas seções contíguas.
         A nova seção herda uma cópia do posicionamento para fácil ajuste pelo usuário.
         """
-        t = max(0.5, min(self.total_duration_s - 0.5, float(split_time_s)))
+        t = max(0.001, min(self.total_duration_s - 0.001, round(float(split_time_s), 3)))
 
         # Localizar a seção alvo
         target_idx = -1
         for idx, sec in enumerate(self.sections):
-            if sec.start_time_s + 0.3 <= t <= sec.end_time_s - 0.3:
+            if sec.start_time_s + 0.001 <= t <= sec.end_time_s - 0.001:
                 target_idx = idx
                 break
 
@@ -115,7 +115,7 @@ class SpatialTimelineManager:
         orig_end = orig_sec.end_time_s
 
         # Reduz a seção original
-        orig_sec.end_time_s = round(t, 2)
+        orig_sec.end_time_s = round(t, 3)
 
         # Cria a nova seção
         num_sections = len(self.sections) + 1
@@ -124,7 +124,7 @@ class SpatialTimelineManager:
         new_sec = SpatialSection(
             id=new_id,
             name=name,
-            start_time_s=round(t, 2),
+            start_time_s=round(t, 3),
             end_time_s=orig_end,
             placements=copy.deepcopy(orig_sec.placements),
             color_hex=self._next_color(),
@@ -313,7 +313,8 @@ class SpatialTimelineManager:
                     volume_gain=inv_alpha * p_a.volume_gain + alpha * p_b.volume_gain,
                     is_muted=p_a.is_muted if alpha < 0.5 else p_b.is_muted,
                     is_solo=p_a.is_solo if alpha < 0.5 else p_b.is_solo,
-                    is_stereo=p_a.is_stereo if alpha < 0.5 else p_b.is_stereo
+                    is_stereo=p_a.is_stereo if alpha < 0.5 else p_b.is_stereo,
+                    source_stem_name=p_a.source_stem_name or p_b.source_stem_name
                 )
                 result[k] = interp_plc
             elif p_a:

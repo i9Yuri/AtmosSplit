@@ -21,6 +21,7 @@ import sys
 import time
 import json
 import logging
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -135,8 +136,10 @@ class MainWindow(QMainWindow):
         self.current_source: Optional[AudioSource] = None
         self.current_stems: List[StemTrack] = []
         self.current_placements: Dict[str, SpatialPlacement] = {}
+        self._placement_clipboard: Optional[SpatialPlacement] = None
         self._stem_profiles = {}
         self.stem_cards: Dict[str, StemControlCard] = {}
+        self._stem_audio_by_instance: Dict[str, StemTrack] = {}
 
         # Gerenciador de Automação Temporal por Trechos
         self.timeline_manager = SpatialTimelineManager(total_duration_s=180.0)
@@ -760,6 +763,19 @@ class MainWindow(QMainWindow):
             if active_name:
                 self.room_view.toggle_stereo_mirror(active_name)
                 event.accept()
+        elif key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
+            if active_name in self.current_placements:
+                self._placement_clipboard = copy.copy(self.current_placements[active_name])
+                self.statusBar().showMessage(f"📋 Copiado: '{active_name}'. Pressione Ctrl+V para colar outra instância na sala.", 3000)
+                event.accept()
+        elif key == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
+            if active_name and self._placement_clipboard:
+                self._duplicate_placement(active_name)
+                event.accept()
+        elif key == Qt.Key_Delete:
+            if active_name:
+                self._delete_placement(active_name)
+                event.accept()
         elif key == Qt.Key_M:
             if active_name and active_name in self.stem_cards:
                 self.stem_cards[active_name].btn_mute.click()
@@ -1047,6 +1063,7 @@ class MainWindow(QMainWindow):
         self._stem_profiles = profiles
         preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
         self.current_placements = AutoAtmosDirector.generate_placements(profiles, DirectorPreset(preset_val))
+        self._stem_audio_by_instance = {s.name: s for s in self.current_stems}
 
         # Inicializa o player e atualiza a timeline com a duração real
         self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
@@ -1067,13 +1084,61 @@ class MainWindow(QMainWindow):
             card.deleteLater()
         self.stem_cards.clear()
 
-        for s in self.current_stems:
-            plc = self.current_placements[s.name]
-            card = StemControlCard(s, plc)
+        for instance_name, plc in self.current_placements.items():
+            stem = self._stem_audio_by_instance.get(instance_name) or self._stem_audio_by_instance.get(plc.source_stem_name or instance_name)
+            if not stem:
+                continue
+            card = StemControlCard(stem, plc)
             card.changed.connect(self._on_stem_card_changed)
             card.selected.connect(self.room_view.set_active_stem)
+            card.delete_requested.connect(self._delete_placement)
             self.stems_layout.insertWidget(self.stems_layout.count() - 1, card)
-            self.stem_cards[s.name] = card
+            self.stem_cards[instance_name] = card
+
+    def _duplicate_placement(self, source_name: str):
+        section = self.timeline_manager.get_active_edit_section()
+        source = section.placements.get(source_name)
+        if source is None:
+            return
+        base_name = source.source_stem_name or source_name
+        index = 2
+        while f"{base_name}::{index}" in section.placements:
+            index += 1
+        instance_name = f"{base_name}::{index}"
+        placement = copy.copy(self._placement_clipboard or source)
+        placement.stem_name = instance_name
+        placement.source_stem_name = base_name
+        placement.x = max(-1.0, min(1.0, placement.x + 0.12))
+        section.placements[instance_name] = placement
+        self._stem_audio_by_instance[instance_name] = self._stem_audio_by_instance[base_name]
+        self.current_placements = section.placements
+        self.live_player.set_active_placements(self.current_placements)
+        self._populate_stems_ui()
+        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
+        self.room_view.active_stem_name = instance_name
+        self.room_view._update_rays_cache()
+        self.room_view.update()
+        self._on_room_stem_selected(instance_name)
+        self.statusBar().showMessage(
+            f"✨ Nova instância criada: '{instance_name}'. Posicione-a livremente na sala ou teto!",
+            4000
+        )
+
+    def _delete_placement(self, instance_name: str):
+        if instance_name not in self.stem_cards or not instance_name.split("::")[-1].isdigit():
+            return
+        base_name = instance_name.split("::")[0]
+        section = self.timeline_manager.get_active_edit_section()
+        section.placements.pop(instance_name, None)
+        self._stem_audio_by_instance.pop(instance_name, None)
+        self.current_placements = section.placements
+        self.stem_cards.pop(instance_name, None)
+        self._populate_stems_ui()
+        self.live_player.set_active_placements(self.current_placements)
+        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
+        if self.room_view.active_stem_name == instance_name:
+            self.room_view.set_active_stem(base_name)
+        self.statusBar().showMessage(f"🗑️ Instância '{instance_name}' removida.", 3000)
 
     def _on_preset_selected(self):
         if not self.current_stems:
@@ -1103,6 +1168,7 @@ class MainWindow(QMainWindow):
             active_sec.placements[stem_name].y = y
             active_sec.placements[stem_name].z = z
         self.live_player.update_placement(stem_name, x, y, z)
+        self.live_player.set_active_placements(self.current_placements)
 
     def _on_room_stereo_toggled(self, stem_name: str, is_stereo: bool):
         if stem_name in self.stem_cards:
@@ -1114,6 +1180,7 @@ class MainWindow(QMainWindow):
         if plc:
             plc.is_stereo = is_stereo
             self.live_player.update_placement(stem_name, plc.x, plc.y, plc.z, is_stereo=is_stereo)
+            self.live_player.set_active_placements(self.current_placements)
         status_msg = f"{stem_name}: Espelhamento Estéreo {'ATIVADO (L / R)' if is_stereo else 'DESATIVADO (Mono)'}"
         self.statusBar().showMessage(status_msg, 3000)
 
@@ -1145,6 +1212,7 @@ class MainWindow(QMainWindow):
             lfe=plc.lfe_send,
             is_stereo=plc.is_stereo
         )
+        self.live_player.set_active_placements(self.current_placements)
 
     # --- Sincronização de Automação por Trechos (Timeline) ---
     def _refresh_sections_combo(self):
@@ -1218,7 +1286,7 @@ class MainWindow(QMainWindow):
         sec = self.timeline_manager.get_active_edit_section()
         self._refresh_sections_combo()
         self._on_timeline_section_selected(sec.id)
-        self.statusBar().showMessage(f"Novo trecho criado em {split_time_s:.1f}s! Agora você pode posicionar os instrumentos livremente para este trecho.")
+        self.statusBar().showMessage(f"Novo trecho criado em {split_time_s:.3f}s. Ajuste as posições para este trecho.")
 
     def _on_timeline_renamed(self, sec_id: str, new_name: str):
         self._refresh_sections_combo()

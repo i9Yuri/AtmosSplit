@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QEvent
 from PySide6.QtGui import (
     QPainter,
     QColor,
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QFrame,
+    QScrollArea,
 )
 
 from ..spatial.timeline_manager import SpatialTimelineManager, SpatialSection
@@ -44,8 +45,10 @@ class TimelineTrackCanvas(QWidget):
         super().__init__(parent)
         self.timeline_manager = timeline_manager
         self.current_time_s: float = 0.0
+        self.zoom = 1.0
+        self.current_view_start = 0.0
         self.hovered_section_id: Optional[str] = None
-        self.setMinimumHeight(44)
+        self.setMinimumHeight(68)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -62,9 +65,23 @@ class TimelineTrackCanvas(QWidget):
         w = self.width()
         h = self.height()
         total_d = max(1.0, self.timeline_manager.total_duration_s)
+        scale = w / self.visible_duration_s
 
         # Fundo do trilho
         painter.fillRect(0, 0, w, h, QColor("#12141A"))
+
+        painter.setPen(QPen(QColor("#394150"), 1))
+        painter.drawLine(0, 20, w, 20)
+        step = self._ruler_step(self.visible_duration_s)
+        tick = math.floor(self.current_view_start / step) * step
+        painter.setFont(QFont("monospace", 8))
+        while tick <= min(total_d, self.current_view_start + w / scale):
+            x = (tick - self.current_view_start) * scale
+            if 0 <= x <= w:
+                painter.setPen(QPen(QColor("#718096"), 1))
+                painter.drawLine(int(x), 14, int(x), 23)
+                painter.drawText(QPointF(x + 3, 12), self._format_time(tick, step))
+            tick += step
 
         # Desenhar blocos de seções
         sections = self.timeline_manager.sections
@@ -74,8 +91,10 @@ class TimelineTrackCanvas(QWidget):
             start_ratio = sec.start_time_s / total_d
             end_ratio = sec.end_time_s / total_d
 
-            x1 = start_ratio * w
-            x2 = end_ratio * w
+            x1 = (sec.start_time_s - self.current_view_start) * scale
+            x2 = (sec.end_time_s - self.current_view_start) * scale
+            if x2 < 0 or x1 > w:
+                continue
             block_w = max(4.0, x2 - x1)
 
             is_active = (sec.id == active_edit_id)
@@ -86,7 +105,7 @@ class TimelineTrackCanvas(QWidget):
             # Preenchimento translúcido elegante
             fill_alpha = 95 if is_active else (65 if is_hovered else 40)
             fill_color = QColor(base_color.red(), base_color.green(), base_color.blue(), fill_alpha)
-            painter.fillRect(QRectF(x1, 2, block_w - 1, h - 4), fill_color)
+            painter.fillRect(QRectF(x1, 24, block_w - 1, h - 26), fill_color)
 
             # Borda do bloco
             if is_active:
@@ -96,7 +115,7 @@ class TimelineTrackCanvas(QWidget):
             else:
                 painter.setPen(QPen(QColor(base_color.red(), base_color.green(), base_color.blue(), 140), 1.0))
 
-            painter.drawRoundedRect(QRectF(x1 + 0.5, 2.5, block_w - 2, h - 5), 3.0, 3.0)
+            painter.drawRoundedRect(QRectF(x1 + 0.5, 24.5, block_w - 2, h - 25), 3.0, 3.0)
 
             # Rótulo da Seção
             if block_w > 45:
@@ -111,12 +130,11 @@ class TimelineTrackCanvas(QWidget):
                 else:
                     label_text = sec.name
 
-                text_rect = QRectF(x1 + 6, 2, block_w - 12, h - 4)
+                text_rect = QRectF(x1 + 6, 24, block_w - 12, h - 26)
                 painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, label_text)
 
         # Desenhar Playhead (Agulha de reprodução em tempo real)
-        play_ratio = min(1.0, max(0.0, self.current_time_s / total_d))
-        play_x = play_ratio * w
+        play_x = (self.current_time_s - self.current_view_start) * scale
 
         painter.setPen(QPen(QColor("#00E5FF"), 1.8))
         painter.drawLine(int(play_x), 0, int(play_x), h)
@@ -125,16 +143,15 @@ class TimelineTrackCanvas(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(QColor("#00E5FF")))
         triangle = [
-            QPointF(play_x - 5, 0),
-            QPointF(play_x + 5, 0),
-            QPointF(play_x, 7)
+            QPointF(play_x - 5, 22),
+            QPointF(play_x + 5, 22),
+            QPointF(play_x, 29)
         ]
         painter.drawPolygon(triangle)
 
     def _get_section_at_x(self, px: float) -> Optional[SpatialSection]:
         w = max(1.0, float(self.width()))
-        ratio = max(0.0, min(1.0, px / w))
-        target_time = ratio * self.timeline_manager.total_duration_s
+        target_time = self.current_view_start + max(0.0, min(w, px)) / w * self.visible_duration_s
         for sec in self.timeline_manager.sections:
             if sec.start_time_s <= target_time <= sec.end_time_s:
                 return sec
@@ -149,9 +166,33 @@ class TimelineTrackCanvas(QWidget):
             # Também efetua seek para o tempo clicado
             w = max(1.0, float(self.width()))
             ratio = max(0.0, min(1.0, event.position().x() / w))
-            t = ratio * self.timeline_manager.total_duration_s
+            t = self.current_view_start + ratio * self.visible_duration_s
             self.seek_clicked.emit(t)
             self.update()
+
+    @property
+    def visible_duration_s(self) -> float:
+        return max(0.001, self.timeline_manager.total_duration_s / self.zoom)
+
+    def set_view(self, zoom: float, start_s: float):
+        self.zoom = max(1.0, min(128.0, float(zoom)))
+        self.current_view_start = max(0.0, min(
+            max(0.0, self.timeline_manager.total_duration_s - self.visible_duration_s), float(start_s)
+        ))
+        self.update()
+
+    @staticmethod
+    def _ruler_step(visible_duration: float) -> float:
+        target = visible_duration / 8.0
+        options = (0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300)
+        return next((step for step in options if step >= target), options[-1])
+
+    @staticmethod
+    def _format_time(time_s: float, step: float) -> str:
+        if step < 1:
+            return f"{time_s:09.3f}s"
+        minutes, seconds = divmod(int(time_s), 60)
+        return f"{minutes:02d}:{seconds:02d}"
 
     def mouseMoveEvent(self, event: QMouseEvent):
         sec = self._get_section_at_x(event.position().x())
@@ -248,19 +289,88 @@ class TimelineWidget(QFrame):
         self.btn_delete.clicked.connect(self._on_delete_clicked)
         bar_header.addWidget(self.btn_delete)
 
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setToolTip("Reduzir zoom")
+        self.btn_zoom_out.clicked.connect(lambda: self._set_zoom(self.zoom / 1.5))
+        bar_header.addWidget(self.btn_zoom_out)
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setToolTip("Aumentar zoom")
+        self.btn_zoom_in.clicked.connect(lambda: self._set_zoom(self.zoom * 1.5))
+        bar_header.addWidget(self.btn_zoom_in)
+        self.btn_zoom_reset = QPushButton("100%")
+        self.btn_zoom_reset.clicked.connect(lambda: self._set_zoom(1.0))
+        bar_header.addWidget(self.btn_zoom_reset)
+
         layout.addLayout(bar_header)
 
         # Canvas gráfico de seções e playhead
         self.canvas = TimelineTrackCanvas(self.timeline_manager)
         self.canvas.section_clicked.connect(self._on_section_clicked)
         self.canvas.seek_clicked.connect(self.seek_requested)
-        layout.addWidget(self.canvas)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setWidget(self.canvas)
+        self.canvas.installEventFilter(self)
+        self.scroll_area.horizontalScrollBar().valueChanged.connect(self._on_scroll)
+        layout.addWidget(self.scroll_area)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocus()
 
         self._refresh_status_labels()
 
     def set_current_playback_time(self, time_s: float):
         """Atualiza a posição do cursor na barra de tempo."""
         self.canvas.set_playhead_time(time_s)
+
+    def _set_zoom(self, zoom: float, anchor_x: Optional[float] = None):
+        old_zoom = self.zoom
+        zoom = max(1.0, min(128.0, zoom))
+        if abs(zoom - old_zoom) < 1e-6:
+            return
+        width = max(1, self.scroll_area.viewport().width())
+        x = width / 2 if anchor_x is None else anchor_x
+        anchor_time = self.canvas.current_view_start + x / width * self.canvas.visible_duration_s
+        self.zoom = zoom
+        self.canvas.set_view(zoom, 0.0)
+        content_width = max(width, int(width * zoom))
+        self.canvas.resize(content_width, 68)
+        self.scroll_area.horizontalScrollBar().setValue(max(0, int(anchor_time / self.timeline_manager.total_duration_s * content_width - x)))
+
+    @property
+    def zoom(self) -> float:
+        return getattr(self, "_zoom", 1.0)
+
+    @zoom.setter
+    def zoom(self, value: float):
+        self._zoom = value
+
+    def _on_scroll(self, value: int):
+        start_s = value / max(1, self.canvas.width()) * self.timeline_manager.total_duration_s
+        self.canvas.set_view(self.zoom, start_s)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        viewport_width = max(1, self.scroll_area.viewport().width())
+        width = max(viewport_width, int(viewport_width * self.zoom))
+        if self.canvas.width() != width:
+            self.canvas.resize(width, 68)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+            factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+            self._set_zoom(self.zoom * factor, event.position().x())
+            return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            self._set_zoom(self.zoom * (1.2 if event.angleDelta().y() > 0 else 1 / 1.2))
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def refresh_timeline(self):
         """Força atualização visual completa após adição/remoção de seções."""

@@ -39,11 +39,13 @@ Aplicação desktop nativa para Linux (Python 3.11 + PySide6), 100% gratuita, of
 - **Controle Fino de Altura por Scroll:** Clique na bolinha e role a roda do mouse para subir ou descer o som no espaço tridimensional.
 - **Espelhamento Estéreo Simétrico (L / R):** Elimina o desbalanceamento unilateral agressivo nos pratos e sintetizadores. Duas esferas gêmeas unidas por uma ponte estéreo se movem simetricamente ($X \to -X$).
 - **Medidores VU Reativos:** Cada nó pulsa visualmente em tempo real acompanhando a energia musical do seu instrumento.
+- **Instâncias independentes:** `Ctrl+C` copia o posicionamento selecionado; `Ctrl+V` cria outra instância do mesmo áudio com controles espaciais próprios. `Delete` remove cópias.
 
 ### 4. Automação Espacial Dinâmica por Trechos (Timeline)
 - **Divisão com 1 Clique (`✂️ Dividir no Tempo Atual`):** Fatie a música em seções independentes (Intro, Verso, Refrão, Solo, Ponte, Final).
 - **Mixagem Exclusiva por Trecho:** Defina a voz na frente no verso e no fundo com elevação de teto durante o refrão.
 - **Transição Hermite Smoothstep ($3\alpha^2 - 2\alpha^3$):** Movimentação contínua e cinematográfica de instrumentos entre seções sem saltos ou cliques acústicos.
+- **Zoom temporal:** Use `Ctrl+roda`, os botões `+` / `−` / `100%` e a barra horizontal. A régua detalha até milissegundos; os splits preservam resolução de 0,001 s.
 
 ### 5. Dolby Atmos Real com Joint Object Coding (E-AC-3 JOC via `ac3forge`)
 - **Fim do Falso Atmos 5.1:** Utiliza o encoder nativo `ac3forge` para gerar bitstream autêntico **Dolby Digital Plus with Dolby Atmos (E-AC-3 JOC)** com metadados espaciais OAMD, complexidade 13 e 12 objetos 3D discretos.

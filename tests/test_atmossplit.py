@@ -825,6 +825,71 @@ def test_cpython_none_refcount_shield_and_zero_paint_leak():
     assert sys.getrefcount(None) > 100_000_000, "Blindagem deve manter refcount seguro sem colapso!"
 
 
+def test_timeline_millisecond_zoom_and_ruler():
+    """Valida o zoom da timeline com precisão de milissegundos e régua adaptativa."""
+    from PySide6.QtWidgets import QApplication
+    from src.spatial.timeline_manager import SpatialTimelineManager
+    from src.spatial.auto_director import SpatialPlacement
+    from src.ui.timeline_widget import TimelineWidget, TimelineTrackCanvas
+
+    app = QApplication.instance() or QApplication(["test_zoom"])
+    tm = SpatialTimelineManager(30.0, {"vocals": SpatialPlacement("vocals", 0, 0, 0, 0.2, 0, 1.0)})
+    widget = TimelineWidget(tm)
+    widget.resize(800, 140)
+    widget.show()
+    app.processEvents()
+
+    # Zoom padrão 1.0 -> 30s visíveis
+    assert abs(widget.canvas.visible_duration_s - 30.0) < 0.1
+    step_default = TimelineTrackCanvas._ruler_step(30.0)
+    assert step_default >= 1.0
+
+    # Aplica zoom 16x -> ~1.875s visíveis (escala de milissegundos)
+    widget._set_zoom(16.0)
+    app.processEvents()
+    assert abs(widget.canvas.visible_duration_s - (30.0 / 16.0)) < 0.05
+    step_zoomed = TimelineTrackCanvas._ruler_step(widget.canvas.visible_duration_s)
+    assert step_zoomed <= 0.25
+
+    # Divisão com precisão de 3 casas decimais (milissegundo)
+    split_t = 1.456
+    new_sec = tm.split_section_at(split_t)
+    assert new_sec is not None
+    assert abs(tm.sections[0].end_time_s - 1.456) < 1e-4
+    assert abs(new_sec.start_time_s - 1.456) < 1e-4
+
+
+def test_spatial_placement_cloning_and_multichannel_render():
+    """Valida duplicação de instâncias de stems e renderização 7.1.4 combinada."""
+    sr = 48000
+    dur = 0.5
+    t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+    sig = 0.3 * np.sin(2 * np.pi * 440 * t)
+    audio = np.stack([sig, sig], axis=1)
+    stem = StemTrack(name="lead_vocal", display_name="Vocal Principal", color_hex="#00E5FF", audio_data=audio, sample_rate=sr)
+
+    plc1 = SpatialPlacement("lead_vocal", x=0.0, y=0.9, z=0.0, spread=0.1, lfe_send=0.0, volume_gain=1.0)
+    # Clone colocado no fundo e no teto
+    plc2 = SpatialPlacement("lead_vocal::2", x=-0.7, y=-0.8, z=0.9, spread=0.2, lfe_send=0.0, volume_gain=0.8, source_stem_name="lead_vocal")
+
+    placements = {
+        "lead_vocal": plc1,
+        "lead_vocal::2": plc2
+    }
+
+    renderer = MasterRenderer714()
+    rendered = renderer.render_to_multichannel_714([stem], placements)
+    assert rendered.shape == (int(sr * dur), 12)
+    # Deve haver energia tanto no Centro Frontal (da plc1) quanto nos Canais Traseiros/Teto (da plc2)
+    center_energy = np.sum(np.abs(rendered[:, 2]))
+    rear_energy = np.sum(np.abs(rendered[:, 4])) + np.sum(np.abs(rendered[:, 5]))
+    top_energy = np.sum(np.abs(rendered[:, 10])) + np.sum(np.abs(rendered[:, 11]))
+    assert center_energy > 0, "Instância frontal deve alimentar o canal central"
+    assert rear_energy > 0, "Instância clonada traseira deve alimentar os surrounds traseiros"
+    assert top_energy > 0, "Instância clonada no teto deve alimentar os canais de altura"
+
+
+
 
 
 

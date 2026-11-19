@@ -167,11 +167,15 @@ class LiveSpatialPlayer:
         is_solo = dict(dsp.is_solo)
         gains_l = dict(dsp.cached_vbap_gains_l)
         gains_r = dict(dsp.cached_vbap_gains_r)
+        active_names = set(placements)
         for name, plc in placements.items():
             vol_gains[name] = float(plc.volume_gain)
             is_stereo[name] = bool(plc.is_stereo)
             is_muted[name] = bool(plc.is_muted)
             is_solo[name] = bool(plc.is_solo)
+            source_name = plc.source_stem_name or name
+            if source_name not in dsp.cached_ch_l:
+                continue
             if plc.is_stereo:
                 dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
                 gains_l[name] = np.asarray(
@@ -189,6 +193,12 @@ class LiveSpatialPlayer:
                 )
                 gains_l[name] = gains
                 gains_r[name] = gains
+        vol_gains = {name: value for name, value in vol_gains.items() if name in active_names}
+        is_stereo = {name: value for name, value in is_stereo.items() if name in active_names}
+        is_muted = {name: value for name, value in is_muted.items() if name in active_names}
+        is_solo = {name: value for name, value in is_solo.items() if name in active_names}
+        gains_l = {name: value for name, value in gains_l.items() if name in active_names}
+        gains_r = {name: value for name, value in gains_r.items() if name in active_names}
         self._cached_vbap_gains_l = gains_l
         self._cached_vbap_gains_r = gains_r
         self._dsp_state = AudioDSPState(
@@ -308,14 +318,20 @@ class LiveSpatialPlayer:
                 self._cached_ch_l[s.name] = np.ascontiguousarray(l, dtype=np.float32)
                 self._cached_ch_r[s.name] = np.ascontiguousarray(r, dtype=np.float32)
                 self._cached_mono[s.name] = np.ascontiguousarray(mono, dtype=np.float32)
-                self._recompute_gains_for_stem(s.name)
-
-                plc = placements.get(s.name)
-                if plc:
-                    vol_gains[s.name] = float(plc.volume_gain)
-                    is_stereo[s.name] = bool(plc.is_stereo)
-                    is_muted[s.name] = bool(plc.is_muted)
-                    is_solo[s.name] = bool(plc.is_solo)
+                matching = [(name, plc) for name, plc in placements.items() if (plc.source_stem_name or name) == s.name]
+                for name, plc in matching:
+                    vol_gains[name] = float(plc.volume_gain)
+                    is_stereo[name] = bool(plc.is_stereo)
+                    is_muted[name] = bool(plc.is_muted)
+                    is_solo[name] = bool(plc.is_solo)
+                    if plc.is_stereo:
+                        dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
+                        self._cached_vbap_gains_l[name] = np.asarray(self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                        self._cached_vbap_gains_r[name] = np.asarray(self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                    else:
+                        gains = np.asarray(self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                        self._cached_vbap_gains_l[name] = gains
+                        self._cached_vbap_gains_r[name] = gains
                     if plc.is_solo:
                         any_solo = True
 
@@ -593,15 +609,15 @@ class LiveSpatialPlayer:
 
             any_solo = dsp.any_solo
 
-            for s in dsp.stems:
-                name = s.name
+            for name, plc in self.placements.items():
+                source_name = plc.source_stem_name or name
                 if any_solo and not dsp.is_solo.get(name, False):
                     continue
                 if dsp.is_muted.get(name, False):
                     continue
 
-                ch_l_full = dsp.cached_ch_l.get(name)
-                ch_r_full = dsp.cached_ch_r.get(name)
+                ch_l_full = dsp.cached_ch_l.get(source_name)
+                ch_r_full = dsp.cached_ch_r.get(source_name)
                 if ch_l_full is None or ch_r_full is None:
                     continue
 
@@ -610,7 +626,7 @@ class LiveSpatialPlayer:
                 if slice_len <= 0 or slice_len > block_714.shape[0]:
                     continue
 
-                gain_vol = dsp.vol_gains.get(name, 1.0)
+                gain_vol = dsp.vol_gains.get(name, plc.volume_gain)
                 l_slice = ch_l_full[start_idx:start_idx + slice_len] * gain_vol
                 r_slice = ch_r_full[start_idx:start_idx + slice_len] * gain_vol
 

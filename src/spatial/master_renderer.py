@@ -50,12 +50,15 @@ class MasterRenderer714:
         if not stems:
             return np.zeros((1024, 12), dtype=np.float32)
 
+        if timeline_manager is not None and timeline_manager.sections:
+            placements = timeline_manager.get_active_edit_section().placements
+
         # Encontrar o comprimento máximo em amostras
         max_samples = max(s.audio_data.shape[0] for s in stems)
         sr = cfg.sample_rate
 
         # Padronizar stems para comprimento uniforme
-        padded_stems: List[Tuple[StemTrack, np.ndarray, np.ndarray]] = []
+        padded_stems: List[Tuple[str, StemTrack, np.ndarray, np.ndarray]] = []
         for s in stems:
             data = s.audio_data
             if data.shape[0] < max_samples:
@@ -70,7 +73,16 @@ class MasterRenderer714:
                 raw = data[:, 0] if data.ndim == 2 else data
                 ch_l = raw
                 ch_r = raw
-            padded_stems.append((s, ch_l, ch_r))
+            instances = [(name, plc) for name, plc in placements.items() if (plc.source_stem_name or name) == s.name]
+            if not instances:
+                instances = [(s.name, SpatialPlacement(
+                    stem_name=s.name, x=s.initial_pan_x, y=s.initial_pan_y, z=s.initial_pan_z,
+                    spread=s.initial_spread, lfe_send=s.initial_lfe_send, volume_gain=1.0
+                ))]
+                placements = {**placements, s.name: instances[0][1]}
+            for instance_name, plc in instances:
+                if (plc.source_stem_name or instance_name) == s.name:
+                    padded_stems.append((instance_name, s, ch_l, ch_r))
 
         # Checar se usamos renderização estática ou automação dinâmica temporal
         has_dynamic_timeline = (
@@ -104,16 +116,16 @@ class MasterRenderer714:
 
     def _render_static_placements(
         self,
-        padded_stems: List[Tuple[StemTrack, np.ndarray, np.ndarray]],
+        padded_stems: List[Tuple[str, StemTrack, np.ndarray, np.ndarray]],
         max_samples: int,
         placements: Dict[str, SpatialPlacement]
     ) -> np.ndarray:
         """Renderização vetorizada rápida para quando o posicionamento é constante."""
         out_matrix = np.zeros((max_samples, 12), dtype=np.float32)
-        any_solo = any(placements.get(s[0].name, SpatialPlacement(s[0].name, 0,0,0,0,0,1)).is_solo for s in padded_stems)
+        any_solo = any(placements.get(s[0], SpatialPlacement(s[0], 0,0,0,0,0,1)).is_solo for s in padded_stems)
 
-        for s, ch_l, ch_r in padded_stems:
-            plc = placements.get(s.name, SpatialPlacement(
+        for instance_name, s, ch_l, ch_r in padded_stems:
+            plc = placements.get(instance_name, SpatialPlacement(
                 stem_name=s.name,
                 x=s.initial_pan_x,
                 y=s.initial_pan_y,
@@ -135,7 +147,7 @@ class MasterRenderer714:
 
     def _render_dynamic_timeline(
         self,
-        padded_stems: List[Tuple[StemTrack, np.ndarray, np.ndarray]],
+        padded_stems: List[Tuple[str, StemTrack, np.ndarray, np.ndarray]],
         max_samples: int,
         sr: int,
         timeline_manager: "SpatialTimelineManager",
@@ -158,12 +170,12 @@ class MasterRenderer714:
             time_s = (start_idx + block_len / 2.0) / float(sr)
             # Obter posicionamentos interpolados da timeline para este momento exato
             current_plcs = timeline_manager.get_interpolated_placements(time_s)
-            any_solo = any(current_plcs.get(s[0].name, SpatialPlacement(s[0].name, 0,0,0,0,0,1)).is_solo for s in padded_stems)
+            any_solo = any(current_plcs.get(s[0], SpatialPlacement(s[0], 0,0,0,0,0,1)).is_solo for s in padded_stems)
 
             block_out = np.zeros((block_len, 12), dtype=np.float32)
 
-            for s, ch_l, ch_r in padded_stems:
-                plc = current_plcs.get(s.name)
+            for instance_name, s, ch_l, ch_r in padded_stems:
+                plc = current_plcs.get(instance_name)
                 if not plc:
                     continue
                 if any_solo and not plc.is_solo:

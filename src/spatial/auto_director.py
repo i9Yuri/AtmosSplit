@@ -33,6 +33,7 @@ class SpatialPlacement:
     is_muted: bool = False
     is_solo: bool = False
     is_stereo: bool = False  # Espelhamento simétrico estéreo L / R
+    source_stem_name: Optional[str] = None  # Stem de áudio compartilhado por uma instância clonada
 
 
 class AutoAtmosDirector:
@@ -221,7 +222,7 @@ class AutoAtmosDirector:
                 spread=max(0.0, min(1.0, spread)),
                 lfe_send=max(0.0, min(1.0, lfe_send)),
                 volume_gain=gain,
-                is_stereo=is_stereo
+                is_stereo=is_stereo,
             )
 
         return placements

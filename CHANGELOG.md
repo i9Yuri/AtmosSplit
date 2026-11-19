@@ -2,6 +2,21 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.7.0] - 2026-11-19
+### Adicionado & Aprimorado (Zoom na Timeline com Precisão de Milissegundos e Clonagem de Nós Espaciais via Ctrl+C / Ctrl+V)
+- **Zoom Adaptativo na Timeline (Até Escala de Milissegundos):**
+  - **Controle de Zoom Fluido:** Suporte a zoom contínuo de 100% até 128x عبر `Ctrl + Roda do Mouse` sobre a timeline, botões táteis `[+]` (Aumentar zoom), `[-]` (Reduzir zoom) e `[100%]` (Resetar visualização).
+  - **Régua Temporal Graduada (Time Ruler):** Adicionada régua superior com marcas e subdivisões dinâmicas que se adaptam automaticamente do nível de minutos/segundos até resolução de **0,001 s (milissegundo)**.
+  - **Navegação Horizontal e Viewport Desacoplado:** Implementada barra de rolagem horizontal nativa com zoom ancorado no cursor do mouse, preservando visibilidade exata do playhead e trechos selecionados.
+  - **Fatiamento Cirúrgico de Trechos:** Divisão de trechos (`✂️ Dividir no Tempo Atual`) agora opera com precisão de 3 casas decimais ($0.001\text{s}$), permitindo sincronização milimétrica com batidas, viradas ou transições musicais.
+- **Clonagem e Multi-Instância Espacial (Ctrl+C / Ctrl+V & Delete):**
+  - **Múltiplos Objetos para a Mesma Faixa de Áudio:** O usuário pode selecionar qualquer bolinha no espaço 3D (ex: voz principal `lead_vocal`), pressionar `Ctrl+C` e em seguida `Ctrl+V` para duplicá-la.
+  - **Liberdade Espacial Total:** Cada instância (`lead_vocal`, `lead_vocal::2`, etc.) possui posicionamento $X, Y$, altura $Z$, espelhamento estéreo e ganho completamente independentes, compartilhando a mesma matriz de áudio em memória com zero duplicação de RAM.
+  - **Exclusão Rápida:** Clones podem ser removidos a qualquer momento pressionando a tecla `Delete` com o nó selecionado ou clicando no botão `[×]` no cabeçalho do respectivo card.
+  - **Mixagem Multicanal 7.1.4 Automática:** O motor de reprodução em tempo real (`LiveSpatialPlayer`) e o renderizador final (`MasterRenderer714`) somam e projetam todas as instâncias ativas no bitstream Dolby Atmos e na matriz 7.1.4.
+- **Validação Automatizada:**
+  - 26 testes unitários passando 100% (`pytest tests/test_atmossplit.py`), cobrindo zoom milimétrico, clonagem multi-instância e renderização 7.1.4.
+
 ## [1.6.2] - 2026-11-19
 ### Corrigido & Blindado (Auditoria Codex CLI, Eliminação de Refcount Leak do Shiboken6 e Threading Assíncrono do PortAudio)
 - **Diagnóstico Empírico da Causa Raiz do Fechamento Espontâneo (`SIGABRT status 6` / Core Dump PID 34179):**
