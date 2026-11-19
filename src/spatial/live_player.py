@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import time
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Tuple, Any, TYPE_CHECKING
 
@@ -86,6 +87,8 @@ class LiveSpatialPlayer:
         self._master_volume: float = 1.0
 
         self._stream: Optional[sd.OutputStream] = None
+        self._stream_generation = 0
+        self._stream_starting = False
         self._cached_ch_l: Dict[str, np.ndarray] = {}
         self._cached_ch_r: Dict[str, np.ndarray] = {}
         self._cached_mono: Dict[str, np.ndarray] = {}
@@ -94,6 +97,7 @@ class LiveSpatialPlayer:
 
         # Estado atômico consumido pelo callback de áudio (substituído de forma atômica pela GUI)
         self._dsp_state: AudioDSPState = AudioDSPState()
+        self._binaural_reset_pending = True
 
         # Buffers estáticos pré-alocados para zero alocação dinâmica no callback
         self._preallocated_block_714 = np.zeros((self.block_size, 12), dtype=np.float32)
@@ -142,13 +146,7 @@ class LiveSpatialPlayer:
         self.device_index = device_index
         was_playing = self._is_playing
 
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+        self._close_stream_async()
 
         if was_playing:
             self.play()
@@ -158,6 +156,55 @@ class LiveSpatialPlayer:
         self.timeline_manager = timeline_mgr
         if self.timeline_manager is not None:
             self.timeline_manager.recalculate_section_gains(self.vbap)
+
+    def set_active_placements(self, placements: Dict[str, SpatialPlacement]):
+        """Troca o mapa editado pela GUI sem reconstruir áudio ou recalcular todas as seções."""
+        self.placements = placements
+        dsp = self._dsp_state
+        vol_gains = dict(dsp.vol_gains)
+        is_stereo = dict(dsp.is_stereo)
+        is_muted = dict(dsp.is_muted)
+        is_solo = dict(dsp.is_solo)
+        gains_l = dict(dsp.cached_vbap_gains_l)
+        gains_r = dict(dsp.cached_vbap_gains_r)
+        for name, plc in placements.items():
+            vol_gains[name] = float(plc.volume_gain)
+            is_stereo[name] = bool(plc.is_stereo)
+            is_muted[name] = bool(plc.is_muted)
+            is_solo[name] = bool(plc.is_solo)
+            if plc.is_stereo:
+                dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
+                gains_l[name] = np.asarray(
+                    self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send),
+                    dtype=np.float32
+                )
+                gains_r[name] = np.asarray(
+                    self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send),
+                    dtype=np.float32
+                )
+            else:
+                gains = np.asarray(
+                    self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send),
+                    dtype=np.float32
+                )
+                gains_l[name] = gains
+                gains_r[name] = gains
+        self._cached_vbap_gains_l = gains_l
+        self._cached_vbap_gains_r = gains_r
+        self._dsp_state = AudioDSPState(
+            stems=dsp.stems,
+            cached_ch_l=dsp.cached_ch_l,
+            cached_ch_r=dsp.cached_ch_r,
+            cached_vbap_gains_l=gains_l,
+            cached_vbap_gains_r=gains_r,
+            vol_gains=vol_gains,
+            is_stereo=is_stereo,
+            is_muted=is_muted,
+            is_solo=is_solo,
+            any_solo=any(is_solo.values()),
+            max_samples=dsp.max_samples,
+            master_volume=dsp.master_volume
+        )
 
     def _recompute_gains_for_stem(self, name: str):
         """Recalcula e armazena em cache o vetor de 12 ganhos VBAP de um stem (L e R)."""
@@ -176,6 +223,60 @@ class LiveSpatialPlayer:
 
     def set_stems_and_placements(self, stems: List[StemTrack], placements: Dict[str, SpatialPlacement]):
         """Atualiza os stems e faz cache dos sinais de áudio e ganhos VBAP."""
+        if len(stems) == len(self.stems) and all(a is b for a, b in zip(stems, self.stems)):
+            self.placements = placements
+            gains_l = {}
+            gains_r = {}
+            vol_gains = {}
+            is_stereo = {}
+            is_muted = {}
+            is_solo = {}
+            for stem in stems:
+                plc = placements.get(stem.name)
+                if plc is None:
+                    continue
+                if plc.is_stereo:
+                    dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
+                    gains_l[stem.name] = np.asarray(
+                        self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send),
+                        dtype=np.float32
+                    )
+                    gains_r[stem.name] = np.asarray(
+                        self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send),
+                        dtype=np.float32
+                    )
+                else:
+                    gains = np.asarray(
+                        self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send),
+                        dtype=np.float32
+                    )
+                    gains_l[stem.name] = gains
+                    gains_r[stem.name] = gains
+                vol_gains[stem.name] = float(plc.volume_gain)
+                is_stereo[stem.name] = bool(plc.is_stereo)
+                is_muted[stem.name] = bool(plc.is_muted)
+                is_solo[stem.name] = bool(plc.is_solo)
+
+            self._cached_vbap_gains_l = gains_l
+            self._cached_vbap_gains_r = gains_r
+            if self.timeline_manager is not None:
+                self.timeline_manager.recalculate_section_gains(self.vbap)
+            self._dsp_state = AudioDSPState(
+                stems=list(stems),
+                cached_ch_l=self._cached_ch_l,
+                cached_ch_r=self._cached_ch_r,
+                cached_vbap_gains_l=gains_l,
+                cached_vbap_gains_r=gains_r,
+                vol_gains=vol_gains,
+                is_stereo=is_stereo,
+                is_muted=is_muted,
+                is_solo=is_solo,
+                any_solo=any(is_solo.values()),
+                max_samples=self._max_samples,
+                master_volume=self._master_volume
+            )
+            return
+
         self.stems = stems
         self.placements = placements
         self._cached_ch_l.clear()
@@ -183,7 +284,7 @@ class LiveSpatialPlayer:
         self._cached_mono.clear()
         self._cached_vbap_gains_l.clear()
         self._cached_vbap_gains_r.clear()
-        self.binaural.reset_states()
+        self._binaural_reset_pending = True
 
         max_samples = 0
         vol_gains = {}
@@ -292,6 +393,13 @@ class LiveSpatialPlayer:
         new_gains_l[stem_name] = gl
         new_gains_r[stem_name] = gr
         new_is_stereo[stem_name] = cur_is_stereo
+        new_vol_gains = dict(dsp.vol_gains)
+        new_is_muted = dict(dsp.is_muted)
+        new_is_solo = dict(dsp.is_solo)
+        new_vol_gains[stem_name] = float(plc.volume_gain)
+        new_is_muted[stem_name] = bool(plc.is_muted)
+        new_is_solo[stem_name] = bool(plc.is_solo)
+        any_solo = any(new_is_solo.values())
 
         self._dsp_state = AudioDSPState(
             stems=dsp.stems,
@@ -299,11 +407,11 @@ class LiveSpatialPlayer:
             cached_ch_r=dsp.cached_ch_r,
             cached_vbap_gains_l=new_gains_l,
             cached_vbap_gains_r=new_gains_r,
-            vol_gains=dsp.vol_gains,
+            vol_gains=new_vol_gains,
             is_stereo=new_is_stereo,
-            is_muted=dsp.is_muted,
-            is_solo=dsp.is_solo,
-            any_solo=dsp.any_solo,
+            is_muted=new_is_muted,
+            is_solo=new_is_solo,
+            any_solo=any_solo,
             max_samples=dsp.max_samples,
             master_volume=dsp.master_volume
         )
@@ -335,30 +443,46 @@ class LiveSpatialPlayer:
         self._is_playing = True
         self._is_paused = False
 
-        if _SOUNDDEVICE_AVAILABLE and (self._stream is None or not self._stream.active):
-            try:
-                self._stream = sd.OutputStream(
-                    samplerate=self.sample_rate,
-                    channels=2,
-                    blocksize=self.block_size,
-                    dtype="float32",
-                    device=self.device_index,
-                    callback=self._audio_callback
-                )
-                self._stream.start()
-            except Exception as e:
-                log.warning("Falha ao abrir stream de áudio sounddevice: %s", e)
-                self._stream = None
+        if _SOUNDDEVICE_AVAILABLE and self._stream is None and not self._stream_starting:
+            self._stream_generation += 1
+            generation = self._stream_generation
+            self._stream_starting = True
+
+            def start_stream():
+                stream = None
+                try:
+                    stream = sd.OutputStream(
+                        samplerate=self.sample_rate,
+                        channels=2,
+                        blocksize=self.block_size,
+                        dtype="float32",
+                        device=self.device_index,
+                        callback=self._audio_callback
+                    )
+                    stream.start()
+                    if generation == self._stream_generation and self._is_playing:
+                        self._stream = stream
+                        stream = None
+                except Exception as e:
+                    log.warning("Falha ao abrir stream de áudio sounddevice: %s", e)
+                    if generation == self._stream_generation:
+                        self._is_playing = False
+                finally:
+                    if stream is not None:
+                        try:
+                            stream.stop()
+                            stream.close()
+                        except Exception:
+                            pass
+                    if generation == self._stream_generation:
+                        self._stream_starting = False
+
+            threading.Thread(target=start_stream, name="AtmosSplitAudioStart", daemon=True).start()
 
     def pause(self):
         """Pausa a reprodução mantendo o cursor de tempo."""
         self._is_paused = True
         self._is_playing = False
-        if self._stream is not None:
-            try:
-                self._stream.stop()
-            except Exception:
-                pass
 
     def stop(self):
         """Para a reprodução e zera o tempo."""
@@ -366,14 +490,26 @@ class LiveSpatialPlayer:
         self._is_paused = False
         self._current_sample = 0
         self._latest_time_s = 0.0
-        self.binaural.reset_states()
-        if self._stream is not None:
+        self._binaural_reset_pending = True
+        self._close_stream_async()
+
+    def _close_stream_async(self):
+        """Fecha PortAudio fora do thread da GUI; o callback de áudio nunca usa este caminho."""
+        self._stream_generation += 1
+        stream = self._stream
+        self._stream = None
+        self._stream_starting = False
+        if stream is None:
+            return
+
+        def close_stream():
             try:
-                self._stream.stop()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                log.debug("Erro ao fechar stream de áudio: %s", e)
+
+        threading.Thread(target=close_stream, name="AtmosSplitAudioStop", daemon=True).start()
 
     def seek(self, target_sample_or_ratio: float):
         """Busca posição específica na faixa (em segundos ou fração [0, 1])."""
@@ -382,7 +518,7 @@ class LiveSpatialPlayer:
         else:
             self._current_sample = int(min(self._max_samples, max(0, target_sample_or_ratio)))
         self._latest_time_s = float(self._current_sample) / float(self.sample_rate) if self.sample_rate > 0 else 0.0
-        self.binaural.reset_states()
+        self._binaural_reset_pending = True
 
     @property
     def is_playing(self) -> bool:
@@ -511,6 +647,10 @@ class LiveSpatialPlayer:
                             block_714[:slice_len, ch] += mono_slice * gain
                             if ch == 3:
                                 lfe_energy += float(np.sum(np.abs(mono_slice * gain)))
+
+            if self._binaural_reset_pending:
+                self.binaural.reset_states()
+                self._binaural_reset_pending = False
 
             # Conversão binaural HRTF com estados preservados
             binaural_block = self.binaural.process_714_to_binaural(block_714, keep_state=True)

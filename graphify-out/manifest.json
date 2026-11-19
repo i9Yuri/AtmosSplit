@@ -144,9 +144,9 @@
     "semantic_hash": ""
   },
   "src/spatial/live_player.py": {
-    "mtime": 1795110038.05595,
-    "seen": 1795110523.4911785,
-    "ast_hash": "332558dc4d3cf13927fba653b120d3d8",
+    "mtime": 1795112302.045858,
+    "seen": 1795112933.008615,
+    "ast_hash": "90d88c8596efb215f56f382ecae0d8c1",
     "semantic_hash": ""
   },
   "src/spatial/master_renderer.py": {
@@ -174,15 +174,15 @@
     "semantic_hash": ""
   },
   "src/ui/main_window.py": {
-    "mtime": 1795110317.4921706,
-    "seen": 1795110523.4911957,
-    "ast_hash": "3603234383a6da4da6b7fd5a09162400",
+    "mtime": 1795112781.0971053,
+    "seen": 1795112933.0086336,
+    "ast_hash": "5a7e9aba63c25fe20164c3c1923d0524",
     "semantic_hash": ""
   },
   "src/ui/room_view_714.py": {
-    "mtime": 1795110122.1049182,
-    "seen": 1795110523.4911995,
-    "ast_hash": "aca9876d18d538b4bcb81f2d28cff40d",
+    "mtime": 1795112163.2333357,
+    "seen": 1795112933.0086377,
+    "ast_hash": "f0559f67ce69db2f45d67ba0380b3afa",
     "semantic_hash": ""
   },
   "src/ui/stem_card.py": {
@@ -204,15 +204,15 @@
     "semantic_hash": ""
   },
   "tests/test_atmossplit.py": {
-    "mtime": 1795110398.0650368,
-    "seen": 1795110523.4912128,
-    "ast_hash": "d0d162c210faac1125aebe1a7e1a02ab",
+    "mtime": 1795112850.2418606,
+    "seen": 1795112933.0086513,
+    "ast_hash": "ec3d6fe5f17311580ce79a8958981add",
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1795110509.5472353,
-    "seen": 1795110523.4912167,
-    "ast_hash": "1219bc84022d396fe89f17377ee3dfed",
+    "mtime": 1795112887.7722707,
+    "seen": 1795112933.0086546,
+    "ast_hash": "1c4ba7dff65770cdaec77091514c83dd",
     "semantic_hash": ""
   },
   "ENVIRONMENT_REPORT.md": {
@@ -222,9 +222,9 @@
     "semantic_hash": ""
   },
   "PROJECT_CONTEXT.md": {
-    "mtime": 1795110498.5641172,
-    "seen": 1795110523.4912229,
-    "ast_hash": "71573828b0ecbfb898e8c203c977cb50",
+    "mtime": 1795112907.8004894,
+    "seen": 1795112933.0086615,
+    "ast_hash": "b3cb52cc7c1bec1854e2793ff09f2784",
     "semantic_hash": ""
   },
   "README.md": {

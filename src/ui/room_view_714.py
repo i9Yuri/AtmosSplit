@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import (
     QPainter,
@@ -21,8 +22,6 @@ from PySide6.QtGui import (
     QPen,
     QBrush,
     QFont,
-    QLinearGradient,
-    QRadialGradient,
     QPainterPath,
     QMouseEvent,
     QWheelEvent,
@@ -76,6 +75,7 @@ class RoomView714(QWidget):
         self.color_surround = QColor("#232936")
         self.color_ceiling_ring = QColor(255, 255, 255, 28)
         self.color_text_sec = QColor("#718096")
+        self._stem_colors: Dict[str, QColor] = {}
 
     def _update_rays_cache(self):
         """Atualiza os vetores de ganhos pré-calculados para o feixe acústico visual do instrumento ativo."""
@@ -106,6 +106,7 @@ class RoomView714(QWidget):
     def set_stems_and_placements(self, stems: List[StemTrack], placements: Dict[str, SpatialPlacement]):
         """Atualiza a lista de instrumentos e seus posicionamentos espaciais."""
         self.stems = {s.name: s for s in stems}
+        self._stem_colors = {s.name: QColor(s.color_hex) for s in stems}
         self.placements = placements
         if stems and (self.active_stem_name not in self.stems):
             self.active_stem_name = stems[0].name
@@ -115,11 +116,11 @@ class RoomView714(QWidget):
     def set_active_stem(self, stem_name: str):
         """Seleciona o instrumento ativo de forma idempotente."""
         if stem_name in self.stems:
-            changed = (self.active_stem_name != stem_name)
+            if self.active_stem_name == stem_name:
+                return
             self.active_stem_name = stem_name
             self._update_rays_cache()
-            if changed:
-                self.stem_selected.emit(stem_name)
+            self.stem_selected.emit(stem_name)
             self.update()
 
     def update_placement(self, stem_name: str, x: float, y: float, z: float, is_stereo: Optional[bool] = None):
@@ -148,6 +149,8 @@ class RoomView714(QWidget):
 
     def set_vu_levels(self, stems_vu: Dict[str, float], sub_vu: float):
         """Atualiza os medidores VU instantâneos para animação de pulsação."""
+        if self.stems_vu == stems_vu and self.sub_vu == sub_vu:
+            return
         self.stems_vu = stems_vu
         self.sub_vu = sub_vu
         self.update()
@@ -319,11 +322,10 @@ class RoomView714(QWidget):
     def _draw_listener(self, painter: QPainter, center: QPointF):
         """Ponto de escuta central (sofá do ouvinte)."""
         painter.setPen(Qt.NoPen)
-        grad = QRadialGradient(center, 28)
-        grad.setColorAt(0.0, QColor(99, 179, 237, 45))
-        grad.setColorAt(1.0, QColor(99, 179, 237, 0))
-        painter.setBrush(QBrush(grad))
+        painter.setBrush(QColor(99, 179, 237, 12))
         painter.drawEllipse(center, 28, 28)
+        painter.setBrush(QColor(99, 179, 237, 24))
+        painter.drawEllipse(center, 18, 18)
 
         painter.setPen(QPen(QColor("#63B3ED"), 2.0))
         painter.setBrush(QBrush(QColor("#1A202C")))
@@ -393,7 +395,9 @@ class RoomView714(QWidget):
             plc = self.placements.get(name, SpatialPlacement(name, 0, 0, 0, 0.2, 0, 1))
             is_active = (name == self.active_stem_name)
             is_hovered = (self.hovered_stem_info is not None and self.hovered_stem_info[0] == name)
-            base_color = QColor(stem.color_hex)
+            base_color = self._stem_colors.get(name)
+            if base_color is None:
+                base_color = QColor(stem.color_hex)
             vu_val = self.stems_vu.get(name, 0.0)
             radius = self.get_visual_radius(plc.z, vu_val)
 
@@ -508,30 +512,16 @@ class RoomView714(QWidget):
         # 3. Pulsação Reativa de VU Meter no Nó
         if vu_val > 0.06:
             painter.setPen(Qt.NoPen)
-            vu_halo = QRadialGradient(sphere_pt, radius + vu_val * 16.0)
-            vu_halo.setColorAt(0.0, QColor(base_color.red(), base_color.green(), base_color.blue(), int(vu_val * 180)))
-            vu_halo.setColorAt(1.0, QColor(base_color.red(), base_color.green(), base_color.blue(), 0))
-            painter.setBrush(QBrush(vu_halo))
+            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), int(vu_val * 32)))
             painter.drawEllipse(sphere_pt, radius + vu_val * 16.0, radius + vu_val * 16.0)
 
         # 4. Halo de Seleção e Foco Ativo
         if is_active:
             painter.setPen(Qt.NoPen)
-            halo = QRadialGradient(sphere_pt, radius + 14.0)
-            halo.setColorAt(0.0, QColor(0, 229, 255, 120))
-            halo.setColorAt(1.0, QColor(0, 229, 255, 0))
-            painter.setBrush(QBrush(halo))
+            painter.setBrush(QColor(0, 229, 255, 24))
             painter.drawEllipse(sphere_pt, radius + 14.0, radius + 14.0)
 
-        # 5. Corpo da Esfera Sonora 3D com Gradiente de Volume
-        grad_sphere = QRadialGradient(
-            sphere_pt.x() - radius * 0.3,
-            sphere_pt.y() - radius * 0.3,
-            radius * 1.3
-        )
-        grad_sphere.setColorAt(0.0, base_color.lighter(135))
-        grad_sphere.setColorAt(0.7, base_color)
-        grad_sphere.setColorAt(1.0, base_color.darker(140))
+        # 5. Corpo da esfera sem QGradient: evita setColorAt() na pintura frequente.
 
         if is_active:
             painter.setPen(QPen(QColor("#00E5FF"), 2.5))
@@ -540,7 +530,7 @@ class RoomView714(QWidget):
         else:
             painter.setPen(QPen(QColor(255, 255, 255, 60), 1.0))
 
-        painter.setBrush(QBrush(grad_sphere))
+        painter.setBrush(base_color)
         painter.drawEllipse(sphere_pt, radius, radius)
 
         # 6. Letra de Lado (L/R) ou Porcentagem de Altura

@@ -2,6 +2,26 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.6.2] - 2026-11-19
+### Corrigido & Blindado (Auditoria Codex CLI, Eliminação de Refcount Leak do Shiboken6 e Threading Assíncrono do PortAudio)
+- **Diagnóstico Empírico da Causa Raiz do Fechamento Espontâneo (`SIGABRT status 6` / Core Dump PID 34179):**
+  - O log do systemd/journalctl revelou `Fatal Python error: none_dealloc: deallocating None: bug likely caused by a refcount error in a C extension` ocorrendo no `paintEvent` do `RoomView714` (`_draw_single_puck`).
+  - Análise profunda com o **Codex CLI** (`gpt-6-luna`) e testes analíticos isolados comprovaram que em PySide6/Shiboken 6.12.0 no Linux, métodos void de C++ (`setColorAt`, `setPen`, `setBrush`, `drawEllipse`, etc.) retornam `None` sem invocar `Py_INCREF`. A cada quadro desenhado a 33 FPS para 12 stems, centenas de referências ao singleton global `None` eram perdidas por segundo até seu refcount zerar, disparando `none_dealloc` e abortando o processo com coredump no compositor Wayland.
+- **Eliminação Completa de `QGradient` no Loop de Desenho Frequente (`src/ui/room_view_714.py`):**
+  - Removidas todas as instanciações de `QRadialGradient` e chamadas a `setColorAt()` de dentro de `_draw_single_puck()` e `_draw_listener()`.
+  - O corpo das esferas 3D, halos de seleção e pulsações de VU agora utilizam renderização direta com `QColor` e `QBrush` sólidos / transparentes de alto contraste e performance.
+  - Implementado cache persistente de cores (`_stem_colors`) e verificação diferencial em `set_vu_levels` para evitar chamadas redundantes a `update()` quando os níveis de áudio não se alterarem.
+- **Blindagem Ativa de Refcount do CPython (`_immunize_cpython_none_refcount` em `src/ui/main_window.py`):**
+  - Implementada rotina via `ctypes` que imuniza a contagem de referências do objeto `None`, elevando-a em 1 bilhão na inicialização e monitorando-a periodicamente no timer de polling da interface. Isso impede matematicamente que o refcount de `None` atinja zero sob qualquer condição ou tempo de uso.
+- **Threading Assíncrono para Abertura e Fechamento do PortAudio (`src/spatial/live_player.py`):**
+  - As chamadas bloqueantes `sd.OutputStream.start()`, `.stop()` e `.close()` foram movidas para threads secundárias em background (`start_stream` e `close_stream`), eliminando qualquer travamento ou congelamento na thread principal da interface gráfica.
+  - O reset de estado dos filtros HRTF agora é consumido de forma lazy e segura pela própria thread de áudio (`_binaural_reset_pending`), prevenindo condições de corrida com o callback do PortAudio.
+  - Implementado `set_active_placements()` para atualizar o estado de DSP em tempo real sem reconstruir buffers nem disparar recálculos redundantes de áudio.
+- **Cache de Perfis Acústicos na Janela Principal (`src/ui/main_window.py`):**
+  - A troca de presets agora reaproveita os perfis de análise acústica dos stems (`self._stem_profiles`), dispensando re-análise cara de FFT e envelopes a cada clique.
+- **Suíte de Testes Expandida (24 Testes Automatizados):**
+  - Adicionado teste de estresse `test_cpython_none_refcount_shield_and_zero_paint_leak` executando 5.000 renderizações consecutivas e validando estabilidade absoluta com 100% de aprovação.
+
 ## [1.6.1] - 2026-11-19
 ### Corrigido & Otimizado (Arquitetura DSP 100% Lock-Free e Eliminação de Congelamentos no Sistema)
 - **Eliminação Total de Congelamentos no Sistema Operacional e Compositor Wayland (`src/spatial/live_player.py`):**

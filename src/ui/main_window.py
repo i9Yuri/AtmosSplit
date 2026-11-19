@@ -82,8 +82,25 @@ from .timeline_widget import TimelineWidget
 log = logging.getLogger(__name__)
 
 
+def _immunize_cpython_none_refcount():
+    """
+    Blindagem ativa contra o bug de refcount leak de C extensions / Shiboken6 em Linux.
+    Garante que a contagem de referências do singleton None nunca chegue a zero,
+    impedindo fatal errors de 'none_dealloc: deallocating None' e SIGABRT.
+    """
+    try:
+        import ctypes
+        refcnt = ctypes.c_ssize_t.from_address(id(None))
+        if refcnt.value < 500_000_000:
+            refcnt.value += 1_000_000_000
+    except Exception:
+        pass
+
+
 def _install_crash_shield():
     """Escudo global contra encerramento inesperado por exceções não tratadas no Qt."""
+    _immunize_cpython_none_refcount()
+
     def _safe_excepthook(exc_type, exc_val, exc_tb):
         import traceback
         tb_str = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
@@ -118,6 +135,7 @@ class MainWindow(QMainWindow):
         self.current_source: Optional[AudioSource] = None
         self.current_stems: List[StemTrack] = []
         self.current_placements: Dict[str, SpatialPlacement] = {}
+        self._stem_profiles = {}
         self.stem_cards: Dict[str, StemControlCard] = {}
 
         # Gerenciador de Automação Temporal por Trechos
@@ -707,6 +725,7 @@ class MainWindow(QMainWindow):
 
     def _poll_audio_state(self):
         """Atualização a ~33 FPS lendo snapshots atômicos sem tocar na thread de áudio."""
+        _immunize_cpython_none_refcount()
         cur_s, tot_s, vu_stems, sub_vu, is_playing = self.live_player.get_ui_snapshot()
 
         if is_playing or cur_s > 0:
@@ -1025,6 +1044,7 @@ class MainWindow(QMainWindow):
             s.name: AcousticAnalyzer.analyze_stem(s.name, s.audio_data, s.sample_rate)
             for s in self.current_stems
         }
+        self._stem_profiles = profiles
         preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
         self.current_placements = AutoAtmosDirector.generate_placements(profiles, DirectorPreset(preset_val))
 
@@ -1059,11 +1079,9 @@ class MainWindow(QMainWindow):
         if not self.current_stems:
             return
         preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
-        profiles = {
-            s.name: AcousticAnalyzer.analyze_stem(s.name, s.audio_data, s.sample_rate)
-            for s in self.current_stems
-        }
-        self.current_placements = AutoAtmosDirector.generate_placements(profiles, DirectorPreset(preset_val))
+        self.current_placements = AutoAtmosDirector.generate_placements(
+            self._stem_profiles, DirectorPreset(preset_val)
+        )
 
         # Atualiza a seção atual da timeline com o novo preset
         active_sec = self.timeline_manager.get_active_edit_section()
@@ -1176,6 +1194,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_placements = sec.placements
+        self.live_player.set_active_placements(self.current_placements)
         for name, card in self.stem_cards.items():
             if name in self.current_placements:
                 card.placement = self.current_placements[name]

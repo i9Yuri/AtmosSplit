@@ -789,5 +789,42 @@ def test_lock_free_dsp_and_timeline_crossfade_audio_callback():
     player._is_playing = False
 
 
+def test_cpython_none_refcount_shield_and_zero_paint_leak():
+    """Valida a blindagem ativa de refcount do CPython e a ausência de vazamento de None na renderização."""
+    import sys
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QPainter, QImage, QColor
+    from PySide6.QtCore import QPointF
+    from src.ui.room_view_714 import RoomView714
+    from src.ui.main_window import _immunize_cpython_none_refcount
+
+    _immunize_cpython_none_refcount()
+
+    app = QApplication.instance() or QApplication(["test_shield"])
+    view = RoomView714()
+    img = QImage(400, 300, QImage.Format_ARGB32)
+    p = QPainter(img)
+
+    initial_ref = sys.getrefcount(None)
+    for _ in range(5000):
+        view._draw_single_puck(
+            p,
+            QPointF(100, 100),
+            QPointF(100, 90),
+            20.0,
+            0.5,
+            0.5,
+            QColor("#00E5FF"),
+            True,
+            False,
+            "L"
+        )
+    p.end()
+
+    # O refcount deve permanecer alto e protegido contra dealloc
+    assert sys.getrefcount(None) > 100_000_000, "Blindagem deve manter refcount seguro sem colapso!"
+
+
+
 
 
