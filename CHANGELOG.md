@@ -2,6 +2,29 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.8.0] - 2026-11-19
+### Adicionado & Aprimorado (IA Maestro com Arranjo Estrutural Autônomo, Efeito Vocal Throw 7.1.4 e Timeline Profissional Estilo DAW)
+- **Arranjo Musical Inteligente Autônomo (SongStructureIntelligence / IA Maestro):**
+  - **Segmentação Estrutural de Áudio:** Analisador autônomo baseado em perfis temporais de energia RMS, curvas de atividade vocal (VAD), transientes de bateria e contrastes espectrais.
+  - **Detecção de Seções Canônicas:** Mapeia automaticamente `Intro (Ambiência Aérea)`, `Verso (Voz Frontal Seca)`, `Build-up (Ascensão ao Teto)`, `Refrão (Imersão 360°)`, `Ponte/Solo (Destaque 3D)`, `Refrão Final (Clímax Absoluto)` e `Outro (Decaimento Imersivo)`.
+  - **Efeito Meticuloso "Last Christmas" (Vocal Throw Traseiro 7.1.4):**
+    - Identifica automaticamente momentos chaves de resposta vocal e coros.
+    - Projeta a instância `vocals::spatial_throw` direcionada com grande destaque ($+1.28$ de ganho) aos módulos traseiros destacáveis da JBL Bar 1000MK2 ($BL/BR, x = \pm 0.68, y = -0.78, z = 0.45$).
+    - Durante os versos, o efeito é automaticamente silenciado ($gain = 0.0, is\_muted = True$), garantindo que a voz principal permaneça limpa, intimista e perfeitamente ancorada no canal central frontal.
+    - No refrão e clímax, a voz salta inesperadamente para trás com imersão e presença marcante.
+  - **Transições e Crossfades Hermite Sem Saltos:** Suavização por curvas $S$ (Hermite smoothstep $3\alpha^2 - 2\alpha^3$) nas fronteiras temporais, eliminando qualquer clique, pop ou salto abrupto de volume.
+- **Redesenho Completo da Linha do Tempo (DAW Timeline Canvas Sem Scrollbars):**
+  - **Eliminação Total da QScrollArea do SO:** O canvas agora gerencia diretamente seu próprio viewport virtual (`view_start_s` e `zoom`), erradicando o problema do scrollbar do sistema que cobria os blocos ao dar zoom.
+  - **Correção da Projeção de Coordenadas (1:1 Playhead & Scrubbing):** Fim do duplo fator de escala; cliques e arraste na régua temporal agora buscam exatamente o ponto clicado com precisão de milissegundos.
+  - **Ajuste Tátil de Fronteiras entre Seções (Boundary Dragging):** Ao passar o mouse sobre a linha divisória entre duas seções, o cursor se transforma em `SizeHorCursor` e o usuário pode arrastar a fronteira interativamente, redimensionando as seções adjacentes em tempo real com garantia de contiguidade.
+  - **Mini-Mapa de Visão Geral Integrado (Bird's Eye Navigator):** Barra de visão global no rodapé do canvas exibindo 100% da música com blocos em miniatura, caixa de viewport visível arrastável e agulha de reprodução.
+  - **Eliminação de Diálogos Modais Pop-up:** Divisão de trechos no cursor e exclusão operam de forma direta e fluida sem interromper o fluxo de trabalho do usuário.
+- **Renderização Multicanal e Exportação Unificada:**
+  - O motor `MasterRenderer714` agora unifica todas as instâncias e vocal throws de todas as seções temporais na matriz multicanal 7.1.4, preservando a automação na exportação MP4 Dolby Atmos, MKV e WAV.
+- **Validação Automatizada Completa:**
+  - 30 testes automatizados cobrindo IA Maestro, arraste de fronteiras, minimapa, clonagem de instâncias, exportação JOC e estabilidade de playback com 100% de sucesso.
+
+
 ## [1.7.1] - 2026-11-19
 ### Corrigido & Aprimorado (Correção Dimensional do Demucs htdemucs, Anti-Travamento e Menu de Contexto 3D)
 - **Correção da Incompatibilidade Dimensional do Demucs (`apply_model`):**

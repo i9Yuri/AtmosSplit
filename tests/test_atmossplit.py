@@ -380,6 +380,8 @@ def test_room_view_radius_and_selection():
     dummy_plc.z = 1.0
     ground_pt_elev, sphere_pt_elev = view._get_node_positions(dummy_plc)
     assert sphere_pt_elev.y() < ground_pt_elev.y()  # Em z=1, esfera é elevada verticalmente
+    view.deleteLater()
+    app.processEvents()
 
 
 def test_process_shield_and_cpu_affinity():
@@ -556,6 +558,8 @@ def test_room_view_stereo_pucks_and_toggle():
 
     view.toggle_stereo_mirror("cymbals")
     assert plc.is_stereo is True
+    view.deleteLater()
+    app.processEvents()
 
 
 def test_exporter_etsi_ts_103_420_coordinates(tmp_path: Path):
@@ -715,6 +719,8 @@ def test_stem_card_pan_and_quick_position_snaps():
     assert card.slider_pan.value() == -50
     assert card.slider_pos_y.value() == 20
     assert card.slider_z.value() == 80
+    card.deleteLater()
+    app.processEvents()
 
 
 def test_live_player_crash_proof_and_zero_lock_contention():
@@ -823,6 +829,8 @@ def test_cpython_none_refcount_shield_and_zero_paint_leak():
 
     # O refcount deve permanecer alto e protegido contra dealloc
     assert sys.getrefcount(None) > 100_000_000, "Blindagem deve manter refcount seguro sem colapso!"
+    view.deleteLater()
+    app.processEvents()
 
 
 def test_timeline_millisecond_zoom_and_ruler():
@@ -857,6 +865,8 @@ def test_timeline_millisecond_zoom_and_ruler():
     assert new_sec is not None
     assert abs(tm.sections[0].end_time_s - 1.456) < 1e-4
     assert abs(new_sec.start_time_s - 1.456) < 1e-4
+    widget.deleteLater()
+    app.processEvents()
 
 
 def test_spatial_placement_cloning_and_multichannel_render():
@@ -922,6 +932,8 @@ def test_room_view_signals_and_keyboard_shortcuts():
     event_up = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Up, Qt.NoModifier)
     room.keyPressEvent(event_up)
     assert room.placements["vocals"].z > 0.0
+    room.deleteLater()
+    app.processEvents()
 
 
 def test_stem_card_duplicate_button_and_signal():
@@ -944,6 +956,103 @@ def test_stem_card_duplicate_button_and_signal():
     card.duplicate_requested.connect(lambda name: received_signals.append(name))
     card.btn_clone.click()
     assert received_signals == ["drums"]
+    card.deleteLater()
+    app.processEvents()
+
+
+def test_song_structure_intelligence_and_vocal_throw():
+    """Valida análise musical autônoma, detecção de seções e criação do vocal throw nos módulos traseiros (Last Christmas)."""
+    from src.spatial.song_intelligence import SongStructureIntelligence
+    from src.spatial.auto_director import DirectorPreset
+
+    sr = 48000
+    duration_s = 180.0  # 3 minutos
+    num_samples = int(duration_s * sr)
+
+    # Simular stems com dinâmicas reais
+    t = np.linspace(0, duration_s, num_samples, endpoint=False, dtype=np.float32)
+    # Vocals: ativos no meio
+    voc_signal = np.sin(2 * np.pi * 440 * t) * 0.6
+    # Drums: começam após 12 segundos (intro)
+    drums_signal = np.sin(2 * np.pi * 100 * t) * 0.7
+    drums_signal[:int(12 * sr)] = 0.0
+
+    stems = [
+        StemTrack("vocals", "Voz", "#00E5FF", np.column_stack([voc_signal, voc_signal]), sr),
+        StemTrack("drums", "Bateria", "#FF9100", np.column_stack([drums_signal, drums_signal]), sr),
+        StemTrack("bass", "Baixo", "#00E676", np.zeros((num_samples, 2), dtype=np.float32), sr),
+        StemTrack("other", "Outros", "#D500F9", np.zeros((num_samples, 2), dtype=np.float32), sr),
+    ]
+
+    sections = SongStructureIntelligence.analyze_and_arrange(stems, duration_s, DirectorPreset.BALANCED)
+    assert len(sections) >= 3, "Música de 3 minutos deve gerar múltiplas seções estruturadas"
+
+    # Verificar continuidade temporal estrita
+    assert sections[0].start_time_s == 0.0
+    assert abs(sections[-1].end_time_s - duration_s) < 0.1
+    for i in range(len(sections) - 1):
+        assert abs(sections[i].end_time_s - sections[i + 1].start_time_s) < 1e-4
+
+    # Verificar presença do vocal throw ('vocals::spatial_throw')
+    has_throw = any("vocals::spatial_throw" in sec.placements for sec in sections)
+    assert has_throw, "Efeito Last Christmas deve gerar instância 'vocals::spatial_throw' para módulos traseiros"
+
+    # Verificar comportamento por seção:
+    chorus_sec = next((s for s in sections if "refrão" in s.name.lower() or "clímax" in s.name.lower()), None)
+    verse_sec = next((s for s in sections if "verso" in s.name.lower()), None)
+
+    if chorus_sec:
+        throw_chorus = chorus_sec.placements.get("vocals::spatial_throw")
+        assert throw_chorus is not None
+        assert not throw_chorus.is_muted
+        assert throw_chorus.volume_gain >= 1.2, "No refrão o vocal throw deve ser proeminente e bem destacado"
+        assert throw_chorus.y <= -0.7, "No refrão o vocal throw deve sair nos módulos traseiros destacáveis (BL/BR)"
+
+    if verse_sec:
+        throw_verse = verse_sec.placements.get("vocals::spatial_throw")
+        assert throw_verse is not None
+        assert throw_verse.is_muted or throw_verse.volume_gain == 0.0, "No verso a voz deve permanecer pura e intimista na frente"
+
+
+def test_timeline_interactive_boundary_drag_and_minimap():
+    """Valida o arraste de fronteiras, coordenadas do mini-mapa e ausência de scrollbars."""
+    from PySide6.QtWidgets import QApplication
+    from src.spatial.timeline_manager import SpatialTimelineManager
+    from src.spatial.auto_director import SpatialPlacement
+    from src.ui.timeline_widget import TimelineWidget
+
+    app = QApplication.instance() or QApplication(["test_timeline_drag"])
+    plcs = {"vocals": SpatialPlacement("vocals", 0, 0, 0, 0.2, 0, 1.0)}
+    tm = SpatialTimelineManager(120.0, plcs)
+    tm.split_section_at(40.0)
+    tm.split_section_at(80.0)
+    assert len(tm.sections) == 3
+
+    widget = TimelineWidget(tm)
+    widget.resize(800, 120)
+    widget.show()
+    app.processEvents()
+
+    # 1. Testar ajuste de fronteira via timeline_manager
+    ok = tm.adjust_boundary(0, 45.0)
+    assert ok
+    assert abs(tm.sections[0].end_time_s - 45.0) < 1e-4
+    assert abs(tm.sections[1].start_time_s - 45.0) < 1e-4
+
+    # 2. Testar mini-mapa e conversão de coordenadas
+    canvas = widget.canvas
+    mx = canvas.time_to_mini_x(60.0)
+    assert 0 < mx < 800
+    t_recov = canvas.mini_x_to_time(mx)
+    assert abs(t_recov - 60.0) < 0.1
+
+    # 3. Testar busca precisa de tempo
+    tx = canvas.time_to_x(45.0)
+    assert canvas._hit_test_boundary(tx) == 0
+
+    widget.deleteLater()
+    app.processEvents()
+
 
 
 

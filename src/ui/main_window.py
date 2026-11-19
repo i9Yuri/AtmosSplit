@@ -73,6 +73,7 @@ from ..spatial.binaural_hrtf import BinauralHRTFEngine
 from ..spatial.master_renderer import MasterRenderer714, RenderConfig
 from ..spatial.live_player import LiveSpatialPlayer
 from ..spatial.timeline_manager import SpatialTimelineManager
+from ..spatial.song_intelligence import SongStructureIntelligence
 from ..playback.exporter import AudioExporter714, ExportFormat
 from ..playback.directframe_bridge import DirectFrameBridge
 from ..playback.samsung_dlna_bridge import SamsungDLNABridge
@@ -365,6 +366,7 @@ class MainWindow(QMainWindow):
         self.timeline_widget.section_renamed.connect(self._on_timeline_renamed)
         self.timeline_widget.section_removed.connect(self._on_timeline_removed)
         self.timeline_widget.seek_requested.connect(self._on_timeline_seek_requested)
+        self.timeline_widget.reanalyze_requested.connect(self._on_ia_maestro_clicked)
         main_layout.addWidget(self.timeline_widget)
 
         # 4. Rodapé / Player
@@ -1102,12 +1104,30 @@ class MainWindow(QMainWindow):
         self._stem_profiles = profiles
         preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
         self.current_placements = AutoAtmosDirector.generate_placements(profiles, DirectorPreset(preset_val))
-        self._stem_audio_by_instance = {s.name: s for s in self.current_stems}
 
-        # Inicializa o player e atualiza a timeline com a duração real
+        # Inicializa o player para aferir a duração exata
         self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
         track_duration_s = max(1.0, self.live_player.total_duration_s)
-        self.timeline_manager.reset_to_single_section(track_duration_s, self.current_placements)
+
+        # Arranjo Espacial Automático Dolby Atmos 7.1.4 de Estúdio (Song Structure Intelligence)
+        sections = SongStructureIntelligence.analyze_and_arrange(
+            self.current_stems,
+            track_duration_s,
+            DirectorPreset(preset_val)
+        )
+        self.timeline_manager.set_sections(sections)
+        active_sec = self.timeline_manager.get_active_edit_section()
+        self.current_placements = dict(active_sec.placements)
+
+        # Mapeamento completo de instâncias de áudio (incluindo throw vocal e clones)
+        self._stem_audio_by_instance = {s.name: s for s in self.current_stems}
+        for sec in self.timeline_manager.sections:
+            for inst_name, plc in sec.placements.items():
+                base_name = plc.source_stem_name or (inst_name.split("::")[0] if "::" in inst_name else inst_name)
+                if base_name in self._stem_audio_by_instance:
+                    self._stem_audio_by_instance[inst_name] = self._stem_audio_by_instance[base_name]
+
+        self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
         self.live_player.set_timeline_manager(self.timeline_manager)
         self.timeline_widget.refresh_timeline()
         self._refresh_sections_combo()
@@ -1172,7 +1192,7 @@ class MainWindow(QMainWindow):
         )
 
     def _delete_placement(self, instance_name: str):
-        if instance_name not in self.stem_cards or not instance_name.split("::")[-1].isdigit():
+        if instance_name not in self.stem_cards or "::" not in instance_name:
             return
         base_name = instance_name.split("::")[0]
         section = self.timeline_manager.get_active_edit_section()
@@ -1308,10 +1328,15 @@ class MainWindow(QMainWindow):
 
         self.current_placements = sec.placements
         self.live_player.set_active_placements(self.current_placements)
-        for name, card in self.stem_cards.items():
-            if name in self.current_placements:
-                card.placement = self.current_placements[name]
-                card.sync_from_placement()
+
+        # Se houver instâncias dinâmicas novas (ex: vocal throw no refrão), recria cards
+        if set(self.stem_cards.keys()) != set(self.current_placements.keys()):
+            self._populate_stems_ui()
+        else:
+            for name, card in self.stem_cards.items():
+                if name in self.current_placements:
+                    card.placement = self.current_placements[name]
+                    card.sync_from_placement()
 
         self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
 
@@ -1325,6 +1350,44 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(
             f"Editando trecho: '{sec.name}' ({sec.start_time_s:.1f}s - {sec.end_time_s:.1f}s) • Ajuste os instrumentos na sala para este momento da faixa"
+        )
+
+    def _on_ia_maestro_clicked(self):
+        """Dispara a inteligência musical para analisar a música e gerar arranjo 7.1.4 de estúdio."""
+        if not self.current_stems:
+            self.statusBar().showMessage("Carregue uma faixa antes de acionar o IA Maestro.")
+            return
+
+        preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
+        track_duration_s = max(1.0, self.live_player.total_duration_s)
+
+        self.statusBar().showMessage("✨ IA Maestro analisando dinâmica, energia e arranjando em Dolby Atmos 7.1.4...")
+        sections = SongStructureIntelligence.analyze_and_arrange(
+            self.current_stems,
+            track_duration_s,
+            DirectorPreset(preset_val)
+        )
+        self.timeline_manager.set_sections(sections)
+        active_sec = self.timeline_manager.get_active_edit_section()
+        self.current_placements = dict(active_sec.placements)
+
+        self._stem_audio_by_instance = {s.name: s for s in self.current_stems}
+        for sec in self.timeline_manager.sections:
+            for inst_name, plc in sec.placements.items():
+                base_name = plc.source_stem_name or (inst_name.split("::")[0] if "::" in inst_name else inst_name)
+                if base_name in self._stem_audio_by_instance:
+                    self._stem_audio_by_instance[inst_name] = self._stem_audio_by_instance[base_name]
+
+        self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
+        self.live_player.set_timeline_manager(self.timeline_manager)
+        self.timeline_widget.refresh_timeline()
+        self._refresh_sections_combo()
+        self._populate_stems_ui()
+        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
+
+        self.statusBar().showMessage(
+            f"✨ IA Maestro concluiu o arranjo: {len(sections)} trechos musicais com automação dinâmica 7.1.4 e vocal throws!",
+            6000
         )
 
     def _on_timeline_split_requested(self, split_time_s: float):
@@ -1344,7 +1407,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Trecho removido e fundido com o vizinho.")
 
     def _on_timeline_seek_requested(self, time_s: float):
-        self.live_player.seek(time_s * self.live_player.sample_rate)
+        self.live_player.seek_seconds(time_s)
 
     def _toggle_preview_playback(self):
         if not self.current_stems:

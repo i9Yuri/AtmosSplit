@@ -153,6 +153,22 @@ flowchart TD
 
 ## 7. Histórico de Versões e Decisões Críticas Recentes
 
+- **2026-11-19 (v1.8.0 — IA Maestro com Arranjo Estrutural Autônomo, Efeito Vocal Throw 7.1.4 e Timeline Profissional Estilo DAW):**
+  - **Arranjo Musical Inteligente Autônomo (`SongStructureIntelligence` / IA Maestro):**
+    - Analisador musical algorítmico que decompõe faixas por perfil de energia RMS contínuo, curvas de atividade vocal (VAD) e transientes rítmicos.
+    - Segmenta autonomamente em `Intro (Ambiência Aérea)`, `Verso (Voz Frontal Seca)`, `Build-up (Ascensão ao Teto)`, `Refrão (Imersão 360°)`, `Ponte/Solo (Destaque 3D)`, `Refrão Final (Clímax Absoluto)` e `Outro (Decaimento Imersivo)`.
+    - **Efeito Meticuloso "Last Christmas" (Vocal Throw Traseiro 7.1.4):** Projeta a instância `vocals::spatial_throw` com ganho destacado ($+1.28$) para os módulos traseiros destacáveis da JBL Bar 1000MK2 ($BL/BR, x = \pm 0.68, y = -0.78, z = 0.45$) nos refrões e momentos altos, mantendo-a mutada ($gain = 0.0$) durante os versos para preservar o foco frontal cristalino e íntimo.
+    - Suavização por curvas $S$ (Hermite smoothstep $3\alpha^2 - 2\alpha^3$) nas fronteiras temporais, eliminando qualquer clique, pop ou salto abrupto de volume.
+  - **Redesenho Completo da Linha do Tempo (DAW Timeline Canvas Sem Scrollbars):**
+    - **Eliminação Total da QScrollArea do SO:** O canvas gerencia diretamente seu próprio viewport virtual (`view_start_s` e `zoom`), erradicando o problema do scrollbar do sistema que cobria os blocos ao dar zoom.
+    - **Correção da Projeção de Coordenadas (1:1 Playhead & Scrubbing):** Fim do duplo fator de escala; cliques e arraste na régua temporal agora buscam exatamente o ponto clicado com precisão de milissegundos.
+    - **Ajuste Tátil de Fronteiras entre Seções (Boundary Dragging):** Ao passar o mouse sobre a linha divisória entre duas seções, o cursor se transforma em `SizeHorCursor` e o usuário pode arrastar a fronteira interativamente, redimensionando as seções adjacentes em tempo real com garantia de contiguidade.
+    - **Mini-Mapa de Visão Geral Integrado (Bird's Eye Navigator):** Barra de visão global no rodapé do canvas exibindo 100% da música com blocos em miniatura, caixa de viewport visível arrastável e agulha de reprodução.
+    - **Eliminação de Diálogos Modais Pop-up:** Divisão de trechos no cursor e exclusão operam de forma direta e fluida sem interromper o fluxo de trabalho do usuário.
+  - **Renderização Multicanal e Exportação Unificada:**
+    - O motor `MasterRenderer714` agora unifica todas as instâncias e vocal throws de todas as seções temporais na matriz multicanal 7.1.4, preservando a automação na exportação MP4 Dolby Atmos, MKV e WAV.
+  - **Validação Automatizada Completa:**
+    - 30 testes automatizados cobrindo IA Maestro, arraste de fronteiras, minimapa, clonagem de instâncias, exportação JOC e estabilidade de playback com 100% de sucesso.
 - **2026-11-19 (v1.7.1 — Correção de Segmento Demucs htdemucs, Anti-Travamento e Menu de Contexto 3D):**
   - **Correção da Incompatibilidade Dimensional do Demucs (`apply_model`):**
     - Identificada a causa raiz da falha de carregamento de faixas ("elementos não aparecem" / "Processo de IA finalizado ou cancelado"): o parâmetro hardcoded `segment=10.0` em `stem_engine.py` conflitou com os tensores de atenção posicional da arquitetura `htdemucs` (`BagOfModels`), cujo modelo opera internamente com `segment = 7.8s` (343.980 amostras a 44,1 kHz). O PyTorch disparava `shape '[1, 4, -1, 343980]' is invalid for input of size 3528000`.

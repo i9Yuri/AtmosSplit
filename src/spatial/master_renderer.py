@@ -57,6 +57,11 @@ class MasterRenderer714:
         max_samples = max(s.audio_data.shape[0] for s in stems)
         sr = cfg.sample_rate
 
+        merged_placements = dict(placements)
+        if timeline_manager and hasattr(timeline_manager, "sections"):
+            for sec in timeline_manager.sections:
+                merged_placements.update(sec.placements)
+
         # Padronizar stems para comprimento uniforme
         padded_stems: List[Tuple[str, StemTrack, np.ndarray, np.ndarray]] = []
         for s in stems:
@@ -73,13 +78,13 @@ class MasterRenderer714:
                 raw = data[:, 0] if data.ndim == 2 else data
                 ch_l = raw
                 ch_r = raw
-            instances = [(name, plc) for name, plc in placements.items() if (plc.source_stem_name or name) == s.name]
+            instances = [(name, plc) for name, plc in merged_placements.items() if (plc.source_stem_name or name) == s.name]
             if not instances:
                 instances = [(s.name, SpatialPlacement(
                     stem_name=s.name, x=s.initial_pan_x, y=s.initial_pan_y, z=s.initial_pan_z,
                     spread=s.initial_spread, lfe_send=s.initial_lfe_send, volume_gain=1.0
                 ))]
-                placements = {**placements, s.name: instances[0][1]}
+                merged_placements = {**merged_placements, s.name: instances[0][1]}
             for instance_name, plc in instances:
                 if (plc.source_stem_name or instance_name) == s.name:
                     padded_stems.append((instance_name, s, ch_l, ch_r))

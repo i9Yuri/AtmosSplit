@@ -136,6 +136,36 @@ class SpatialTimelineManager:
         self.active_edit_section_id = new_id
         return new_sec
 
+    def adjust_boundary(self, boundary_idx: int, new_time_s: float) -> bool:
+        """
+        Ajusta a fronteira temporal entre self.sections[boundary_idx] e self.sections[boundary_idx + 1].
+        Garante que nenhuma seção fique menor que 0.1s e preserva a contiguidade exata.
+        """
+        if boundary_idx < 0 or boundary_idx >= len(self.sections) - 1:
+            return False
+
+        sec_left = self.sections[boundary_idx]
+        sec_right = self.sections[boundary_idx + 1]
+
+        min_t = sec_left.start_time_s + 0.1
+        max_t = sec_right.end_time_s - 0.1
+
+        if min_t >= max_t:
+            return False
+
+        clamped_t = round(max(min_t, min(max_t, float(new_time_s))), 3)
+        sec_left.end_time_s = clamped_t
+        sec_right.start_time_s = clamped_t
+        return True
+
+    def set_sections(self, new_sections: List[SpatialSection]):
+        """Define uma nova lista completa de seções gerada pelo Atmos Maestro."""
+        if not new_sections:
+            return
+        self.sections = new_sections
+        self.active_edit_section_id = new_sections[0].id
+        self.total_duration_s = new_sections[-1].end_time_s
+
     def remove_section(self, section_id: str) -> bool:
         """
         Remove uma seção fundindo seu tempo com a seção vizinha.
@@ -191,12 +221,15 @@ class SpatialTimelineManager:
             sec.cached_gains_l.clear()
             sec.cached_gains_r.clear()
             for stem_name, plc in sec.placements.items():
-                if plc.is_stereo:
+                if plc.is_muted or plc.volume_gain <= 0.0:
+                    gl = np.zeros(12, dtype=np.float32)
+                    gr = np.zeros(12, dtype=np.float32)
+                elif plc.is_stereo:
                     dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-                    gl = np.asarray(vbap_engine.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
-                    gr = np.asarray(vbap_engine.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                    gl = np.asarray(vbap_engine.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32) * float(plc.volume_gain)
+                    gr = np.asarray(vbap_engine.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32) * float(plc.volume_gain)
                 else:
-                    gl = np.asarray(vbap_engine.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                    gl = np.asarray(vbap_engine.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32) * float(plc.volume_gain)
                     gr = gl
                 sec.cached_gains_l[stem_name] = gl
                 sec.cached_gains_r[stem_name] = gr
@@ -211,6 +244,7 @@ class SpatialTimelineManager:
         Retorna os vetores de ganhos (L e R) interpolados suavemente por crossfade vetorial direto.
         Zero cálculo trigonométrico em tempo real: pura soma e multiplicação de vetores (12 floats).
         """
+        import numpy as np
         sections = list(self.sections)
         if not sections:
             return None, None
@@ -221,6 +255,7 @@ class SpatialTimelineManager:
 
         t = max(0.0, min(self.total_duration_s, float(time_s)))
         half_w = max(0.05, crossfade_window_s / 2.0)
+        zeros_gain = np.zeros(12, dtype=np.float32)
 
         for idx in range(len(sections) - 1):
             sec_a = sections[idx]
@@ -233,25 +268,18 @@ class SpatialTimelineManager:
                 alpha = raw_alpha * raw_alpha * (3.0 - 2.0 * raw_alpha)
                 inv_alpha = 1.0 - alpha
 
-                gl_a = sec_a.cached_gains_l.get(stem_name)
-                gl_b = sec_b.cached_gains_l.get(stem_name)
-                gr_a = sec_a.cached_gains_r.get(stem_name)
-                gr_b = sec_b.cached_gains_r.get(stem_name)
+                gl_a = sec_a.cached_gains_l.get(stem_name, zeros_gain)
+                gl_b = sec_b.cached_gains_l.get(stem_name, zeros_gain)
+                gr_a = sec_a.cached_gains_r.get(stem_name, zeros_gain)
+                gr_b = sec_b.cached_gains_r.get(stem_name, zeros_gain)
 
-                if gl_a is not None and gl_b is not None:
-                    interp_gl = inv_alpha * gl_a + alpha * gl_b
-                else:
-                    interp_gl = gl_a if gl_a is not None else gl_b
-
-                if gr_a is not None and gr_b is not None:
-                    interp_gr = inv_alpha * gr_a + alpha * gr_b
-                else:
-                    interp_gr = gr_a if gr_a is not None else gr_b
+                interp_gl = inv_alpha * gl_a + alpha * gl_b
+                interp_gr = inv_alpha * gr_a + alpha * gr_b
 
                 return interp_gl, interp_gr
 
         active_sec = self.get_section_at_time(t)
-        return active_sec.cached_gains_l.get(stem_name), active_sec.cached_gains_r.get(stem_name)
+        return active_sec.cached_gains_l.get(stem_name, zeros_gain), active_sec.cached_gains_r.get(stem_name, zeros_gain)
 
     def get_interpolated_placements(
         self,
@@ -312,7 +340,7 @@ class SpatialTimelineManager:
                     spread=inv_alpha * p_a.spread + alpha * p_b.spread,
                     lfe_send=inv_alpha * p_a.lfe_send + alpha * p_b.lfe_send,
                     volume_gain=inv_alpha * p_a.volume_gain + alpha * p_b.volume_gain,
-                    is_muted=p_a.is_muted if alpha < 0.5 else p_b.is_muted,
+                    is_muted=False if ((not p_a.is_muted or not p_b.is_muted) and (p_a.volume_gain > 0 or p_b.volume_gain > 0)) else (p_a.is_muted if alpha < 0.5 else p_b.is_muted),
                     is_solo=p_a.is_solo if alpha < 0.5 else p_b.is_solo,
                     is_stereo=p_a.is_stereo if alpha < 0.5 else p_b.is_stereo,
                     source_stem_name=p_a.source_stem_name or p_b.source_stem_name

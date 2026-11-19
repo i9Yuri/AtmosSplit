@@ -540,6 +540,14 @@ class LiveSpatialPlayer:
 
         threading.Thread(target=close_stream, name="AtmosSplitAudioStop", daemon=True).start()
 
+    def seek_seconds(self, time_s: float):
+        """Busca posição exata em segundos com precisão de milissegundos."""
+        sr = self.sample_rate if self.sample_rate > 0 else 48000
+        target_sample = int(round(max(0.0, float(time_s)) * sr))
+        self._current_sample = int(min(self._max_samples, target_sample))
+        self._latest_time_s = float(self._current_sample) / float(sr)
+        self._binaural_reset_pending = True
+
     def seek(self, target_sample_or_ratio: float):
         """Busca posição específica na faixa (em segundos ou fração [0, 1])."""
         if target_sample_or_ratio <= 1.0 and target_sample_or_ratio >= 0.0:

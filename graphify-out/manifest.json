@@ -108,9 +108,9 @@
     "semantic_hash": ""
   },
   "src/separation/stem_engine.py": {
-    "mtime": 1795105136.6250122,
-    "seen": 1795105413.8067367,
-    "ast_hash": "e795843a462d46ea48d72791187ec489",
+    "mtime": 1795118104.5600774,
+    "seen": 1795123523.5421016,
+    "ast_hash": "b8b54220655f9c215164c0a311fe5cc1",
     "semantic_hash": ""
   },
   "src/separation/worker_cli.py": {
@@ -144,21 +144,21 @@
     "semantic_hash": ""
   },
   "src/spatial/live_player.py": {
-    "mtime": 1795115476.4019551,
-    "seen": 1795115818.437005,
-    "ast_hash": "d4a4a546db5118f02e0e039fe34ec2fc",
+    "mtime": 1795123132.8109505,
+    "seen": 1795123523.5421197,
+    "ast_hash": "12c367bbaa4111416330dcacf1dfc676",
     "semantic_hash": ""
   },
   "src/spatial/master_renderer.py": {
-    "mtime": 1795115481.9160135,
-    "seen": 1795115818.4370089,
-    "ast_hash": "b3db6c301d9178f6ee3a7eceb182f42f",
+    "mtime": 1795122496.7339885,
+    "seen": 1795123523.5421233,
+    "ast_hash": "5fe460d79bddabaef462db514f939172",
     "semantic_hash": ""
   },
   "src/spatial/timeline_manager.py": {
-    "mtime": 1795115336.549473,
-    "seen": 1795115818.4370124,
-    "ast_hash": "078e6ea6263e8f26428bd3725af3e76c",
+    "mtime": 1795123116.0037951,
+    "seen": 1795123523.5421321,
+    "ast_hash": "d501cbe3314dd065a2a1fda8d623cfca",
     "semantic_hash": ""
   },
   "src/spatial/vbap_engine.py": {
@@ -174,27 +174,27 @@
     "semantic_hash": ""
   },
   "src/ui/main_window.py": {
-    "mtime": 1795115665.7309709,
-    "seen": 1795115818.4370213,
-    "ast_hash": "e13e9b8e1a0d051934e3c58d67bdf3db",
+    "mtime": 1795123320.8707018,
+    "seen": 1795123523.5421412,
+    "ast_hash": "afbdfc9ebcc102eb419961aac16d4ff5",
     "semantic_hash": ""
   },
   "src/ui/room_view_714.py": {
-    "mtime": 1795115354.0236583,
-    "seen": 1795115818.4370246,
-    "ast_hash": "3b6234e2f7144a11ed8d714179482d37",
+    "mtime": 1795118301.7139761,
+    "seen": 1795123523.5421448,
+    "ast_hash": "6ea3a18f186e2d62924f5f660af4280e",
     "semantic_hash": ""
   },
   "src/ui/stem_card.py": {
-    "mtime": 1795115634.9416354,
-    "seen": 1795115818.4370282,
-    "ast_hash": "0a3abace4a0ab10f4200530d88c50531",
+    "mtime": 1795118250.307481,
+    "seen": 1795123523.542148,
+    "ast_hash": "667ea5c86657304c93b1556e61dfa6a1",
     "semantic_hash": ""
   },
   "src/ui/timeline_widget.py": {
-    "mtime": 1795115511.4583266,
-    "seen": 1795115818.437032,
-    "ast_hash": "86b9d6cbfe87ef684c3dd2d765340df9",
+    "mtime": 1795123212.5556886,
+    "seen": 1795123523.5421515,
+    "ast_hash": "82f323ac7a5ef3663f18020e7e6ec7ae",
     "semantic_hash": ""
   },
   "tests/multichannel_diagnostics/probe_714_results.json": {
@@ -204,15 +204,15 @@
     "semantic_hash": ""
   },
   "tests/test_atmossplit.py": {
-    "mtime": 1795115741.8017862,
-    "seen": 1795115818.4370382,
-    "ast_hash": "484738b66b7f04578b8de0606b265cb7",
+    "mtime": 1795123444.5198717,
+    "seen": 1795123523.5421574,
+    "ast_hash": "4f4ffb4a5f834f4377ba4bac968bbcc3",
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1795115785.8742259,
-    "seen": 1795115818.4370415,
-    "ast_hash": "78e58c028e508adb26753e35a2cc2336",
+    "mtime": 1795123464.1620576,
+    "seen": 1795123523.5421607,
+    "ast_hash": "5bb36ab42722799f826946dd7eb388ca",
     "semantic_hash": ""
   },
   "ENVIRONMENT_REPORT.md": {
@@ -222,9 +222,9 @@
     "semantic_hash": ""
   },
   "PROJECT_CONTEXT.md": {
-    "mtime": 1795115794.8653157,
-    "seen": 1795115818.4370472,
-    "ast_hash": "9a5ef60f66f7b9ec6e550d8f1277dbf4",
+    "mtime": 1795123480.586213,
+    "seen": 1795123523.5421667,
+    "ast_hash": "35d81f8bace4357cbc8578476750960a",
     "semantic_hash": ""
   },
   "README.md": {
@@ -249,6 +249,12 @@
     "mtime": 1795090872.0048642,
     "seen": 1795095267.8944464,
     "ast_hash": "9d3c553bd2beb88fa8172ddbd8025371",
+    "semantic_hash": ""
+  },
+  "src/spatial/song_intelligence.py": {
+    "mtime": 1795122438.8994422,
+    "seen": 1795123523.5421271,
+    "ast_hash": "a10167c9f362d686f0c1e257b329d40c",
     "semantic_hash": ""
   }
 }
