@@ -316,8 +316,53 @@ class SongStructureIntelligence:
             name = s.name
             nl = name.lower()
 
-            # --- 1. VOZES (VOCALS) ---
-            if "vocal" in nl or "voice" in nl:
+            # --- 1. BACKING VOCALS (CORO / VOZES DE APOIO) ---
+            if "backing" in nl or "choir" in nl or "coro" in nl:
+                if section_type in ("intro_ambient",):
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.75, y=-0.20, z=0.70,
+                        spread=0.75, lfe_send=0.0, volume_gain=0.90, is_stereo=True
+                    )
+                elif section_type in ("verse_dry", "verse_contrast"):
+                    # Verso: Laterais abertas e teto suave, liberando 100% o centro frontal para a voz líder
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.70, y=-0.10, z=0.35,
+                        spread=0.50, lfe_send=0.0, volume_gain=0.75, is_stereo=True
+                    )
+                elif section_type == "verse_groove":
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.75, y=-0.15, z=0.40,
+                        spread=0.55, lfe_send=0.0, volume_gain=0.85, is_stereo=True
+                    )
+                elif section_type == "buildup":
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.80, y=0.0, z=0.75,
+                        spread=0.70, lfe_send=0.0, volume_gain=1.05, is_stereo=True
+                    )
+                elif section_type in ("chorus_drop", "climax"):
+                    # Refrão: Envolvimento 360° total ao redor do ouvinte
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.88, y=-0.35, z=0.55,
+                        spread=0.80, lfe_send=0.0, volume_gain=1.20, is_stereo=True
+                    )
+                elif section_type == "chorus_hook":
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.85, y=-0.45, z=0.50,
+                        spread=0.75, lfe_send=0.0, volume_gain=1.15, is_stereo=True
+                    )
+                elif section_type == "breakdown":
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.65, y=-0.70, z=0.75,
+                        spread=0.70, lfe_send=0.0, volume_gain=0.95, is_stereo=True
+                    )
+                else:  # outro
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.75, y=-0.80, z=0.70,
+                        spread=0.75, lfe_send=0.0, volume_gain=0.85, is_stereo=True
+                    )
+
+            # --- 2. VOZ PRINCIPAL (LEAD VOCAL / VOCALS) ---
+            elif "vocal" in nl or "voice" in nl:
                 if section_type in ("intro_ambient",):
                     # Intro aérea: voz (se houver) soa distante, flutuando alto
                     placements[name] = SpatialPlacement(
@@ -328,37 +373,37 @@ class SongStructureIntelligence:
                     # Verso seco/íntimo: Ancoragem frontal máxima no centro (TV/Center bar)
                     placements[name] = SpatialPlacement(
                         stem_name=name, x=0.0, y=0.98, z=0.0,
-                        spread=0.05, lfe_send=0.0, volume_gain=1.05, is_stereo=False
+                        spread=0.02, lfe_send=0.0, volume_gain=1.05, is_stereo=False
                     )
                 elif section_type == "verse_groove":
                     # Verso com ritmo: leve abertura frontal
                     placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.92, z=0.10,
+                        stem_name=name, x=0.0, y=0.92, z=0.08,
                         spread=0.15, lfe_send=0.0, volume_gain=1.08, is_stereo=False
                     )
                 elif section_type == "buildup":
                     # Build-up: Voz se eleva verticalmente aos canais de teto!
                     placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.80, z=0.48,
-                        spread=0.35, lfe_send=0.0, volume_gain=1.10, is_stereo=False
+                        stem_name=name, x=0.0, y=0.78, z=0.52,
+                        spread=0.35, lfe_send=0.0, volume_gain=1.12, is_stereo=False
                     )
                 elif section_type == "pre_drop":
                     # Pausa pré-drop: voz focada no centro da sala
                     placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.50, z=0.25,
+                        stem_name=name, x=0.0, y=0.45, z=0.20,
                         spread=0.20, lfe_send=0.0, volume_gain=1.0, is_stereo=False
                     )
                 elif section_type in ("chorus_drop", "climax"):
                     # Refrão / Clímax: Potência frontal incisiva e presente
                     placements[name] = SpatialPlacement(
                         stem_name=name, x=0.0, y=0.96, z=0.12,
-                        spread=0.22, lfe_send=0.0, volume_gain=1.16, is_stereo=False
+                        spread=0.22, lfe_send=0.0, volume_gain=1.18, is_stereo=False
                     )
                 elif section_type == "chorus_hook":
                     # Hook do refrão: arco frontal mais amplo
                     placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.86, z=0.22,
-                        spread=0.40, lfe_send=0.0, volume_gain=1.12, is_stereo=False
+                        stem_name=name, x=0.0, y=0.88, z=0.22,
+                        spread=0.38, lfe_send=0.0, volume_gain=1.14, is_stereo=False
                     )
                 elif section_type == "post_chorus":
                     placements[name] = SpatialPlacement(
@@ -373,90 +418,176 @@ class SongStructureIntelligence:
                 elif section_type == "breakdown":
                     # Breakdown: Voz suspensa no centro da sala acima do ouvinte (efeito etéreo)
                     placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.20, z=0.68,
+                        stem_name=name, x=0.0, y=0.20, z=0.72,
                         spread=0.65, lfe_send=0.0, volume_gain=1.10, is_stereo=False
                     )
                 else:  # outro_ambient, outro_groove
                     # Outro: Voz flutua suavemente para trás em direção aos satélites e sobe
                     placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=-0.45, z=0.72,
-                        spread=0.65, lfe_send=0.0, volume_gain=0.92, is_stereo=False
+                        stem_name=name, x=0.0, y=-0.45, z=0.70,
+                        spread=0.65, lfe_send=0.0, volume_gain=0.90, is_stereo=False
                     )
 
-            # --- 2. BATERIA / PERCUSSÃO (DRUMS) ---
+            # --- 3. PRATOS & CHOCALHOS (CYMBALS / HI-HAT) ---
+            elif "cymbal" in nl or "hihat" in nl or "hat" in nl:
+                if section_type == "breakdown":
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.65, y=0.10, z=0.75,
+                        spread=0.60, lfe_send=0.0, volume_gain=0.0, is_stereo=True, is_muted=True
+                    )
+                elif section_type in ("chorus_drop", "climax"):
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.72, y=-0.10, z=0.85,
+                        spread=0.75, lfe_send=0.0, volume_gain=1.15, is_stereo=True
+                    )
+                elif section_type == "buildup":
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.65, y=0.20, z=0.88,
+                        spread=0.70, lfe_send=0.0, volume_gain=1.10, is_stereo=True
+                    )
+                else:
+                    # Teto contínuo nos 4 alto-falantes de altura (TFL, TFR, TBL, TBR)
+                    placements[name] = SpatialPlacement(
+                        stem_name=name, x=0.65, y=0.15, z=0.78,
+                        spread=0.65, lfe_send=0.0, volume_gain=1.00, is_stereo=True
+                    )
+
+            # --- 4. BATERIA / PERCUSSÃO (DRUMS / KICK / SNARE) ---
             elif "drum" in nl or "kick" in nl or "snare" in nl:
-                if section_type in ("intro_ambient",):
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.40, z=0.0,
-                        spread=0.15, lfe_send=0.30, volume_gain=0.80, is_stereo=False
-                    )
-                elif section_type in ("verse_dry", "verse_contrast"):
-                    # Verso seco: Kit focado e firme no chão
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.65, z=0.0,
-                        spread=0.12, lfe_send=0.85, volume_gain=1.00, is_stereo=False
-                    )
-                elif section_type == "verse_groove":
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.60, z=0.05,
-                        spread=0.22, lfe_send=0.90, volume_gain=1.02, is_stereo=False
-                    )
-                elif section_type == "buildup":
-                    # Build-up: Snare roll e viradas sobem verticalmente ao teto!
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.52, z=0.62,
-                        spread=0.50, lfe_send=0.95, volume_gain=1.08, is_stereo=False
-                    )
-                elif section_type in ("chorus_drop", "climax"):
-                    # Refrão: Explosão com pratos distribuídos no teto frontal/traseiro
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.62, z=0.45,
-                        spread=0.55, lfe_send=1.00, volume_gain=1.12, is_stereo=False
-                    )
-                elif section_type == "chorus_hook":
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.58, z=0.40,
-                        spread=0.48, lfe_send=1.00, volume_gain=1.08, is_stereo=False
-                    )
-                elif section_type == "breakdown":
-                    # Breakdown: Bateria é silenciada ou opera com mínima presença
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.35, z=0.0,
-                        spread=0.08, lfe_send=0.20, volume_gain=0.15, is_stereo=False,
-                        is_muted=True
-                    )
-                else:  # bridge_solo, outro
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.50, z=0.20,
-                        spread=0.30, lfe_send=0.75, volume_gain=0.95, is_stereo=False
-                    )
+                if "kick" in nl:
+                    # Bumbo: Sempre ancorado no chão frontal com 100% LFE subwoofer
+                    if section_type == "breakdown":
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.50, z=0.0,
+                            spread=0.05, lfe_send=0.20, volume_gain=0.0, is_stereo=False, is_muted=True
+                        )
+                    else:
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.75, z=0.0,
+                            spread=0.05, lfe_send=1.00,
+                            volume_gain=1.12 if "chorus" in section_type or "climax" in section_type else 1.00,
+                            is_stereo=False
+                        )
+                elif "snare" in nl:
+                    if section_type == "breakdown":
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.40, z=0.0,
+                            spread=0.05, lfe_send=0.0, volume_gain=0.0, is_stereo=False, is_muted=True
+                        )
+                    elif section_type == "buildup":
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.52, z=0.68,
+                            spread=0.50, lfe_send=0.40, volume_gain=1.14, is_stereo=False
+                        )
+                    elif section_type in ("chorus_drop", "climax"):
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.65, z=0.32,
+                            spread=0.35, lfe_send=0.30, volume_gain=1.10, is_stereo=False
+                        )
+                    else:
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.68, z=0.08,
+                            spread=0.15, lfe_send=0.25, volume_gain=1.00, is_stereo=False
+                        )
+                else:  # drums gerais (kit completo do modo fast)
+                    if section_type in ("intro_ambient",):
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.40, z=0.0,
+                            spread=0.15, lfe_send=0.30, volume_gain=0.80, is_stereo=False
+                        )
+                    elif section_type in ("verse_dry", "verse_contrast"):
+                        # Verso seco: Kit focado e firme no chão
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.65, z=0.0,
+                            spread=0.12, lfe_send=0.85, volume_gain=1.00, is_stereo=False
+                        )
+                    elif section_type == "verse_groove":
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.60, z=0.05,
+                            spread=0.22, lfe_send=0.90, volume_gain=1.02, is_stereo=False
+                        )
+                    elif section_type == "buildup":
+                        # Build-up: Viradas e caixa sobem verticalmente ao teto!
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.52, z=0.62,
+                            spread=0.50, lfe_send=0.95, volume_gain=1.08, is_stereo=False
+                        )
+                    elif section_type in ("chorus_drop", "climax"):
+                        # Refrão: Explosão com pratos distribuídos no teto frontal/traseiro
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.62, z=0.45,
+                            spread=0.55, lfe_send=1.00, volume_gain=1.12, is_stereo=False
+                        )
+                    elif section_type == "chorus_hook":
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.58, z=0.40,
+                            spread=0.48, lfe_send=1.00, volume_gain=1.08, is_stereo=False
+                        )
+                    elif section_type == "breakdown":
+                        # Breakdown: Bateria silenciada
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.35, z=0.0,
+                            spread=0.08, lfe_send=0.20, volume_gain=0.0, is_stereo=False,
+                            is_muted=True
+                        )
+                    else:  # bridge_solo, outro
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.50, z=0.20,
+                            spread=0.30, lfe_send=0.75, volume_gain=0.95, is_stereo=False
+                        )
 
-            # --- 3. BAIXO (BASS / 808) ---
+            # --- 5. BAIXO (SUB BASS / MELODIC BASS) ---
             elif "bass" in nl:
-                if section_type in ("intro_ambient", "breakdown"):
-                    # Sub bass sutil e contido
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.35, z=0.0,
-                        spread=0.05, lfe_send=0.40, volume_gain=0.80, is_stereo=False
-                    )
-                elif section_type in ("chorus_drop", "climax"):
-                    # Refrão: Impacto máximo de baixa frequência (100% LFE subwoofer 10")
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.50, z=0.0,
-                        spread=0.05, lfe_send=1.00, volume_gain=1.15, is_stereo=False
-                    )
-                elif section_type == "buildup":
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.45, z=0.0,
-                        spread=0.05, lfe_send=0.95, volume_gain=1.05, is_stereo=False
-                    )
-                else:  # Versos normais
-                    placements[name] = SpatialPlacement(
-                        stem_name=name, x=0.0, y=0.55, z=0.0,
-                        spread=0.05, lfe_send=0.88, volume_gain=1.00, is_stereo=False
-                    )
+                if "sub" in nl:
+                    # Sub-Grave puro mono (< 80 Hz)
+                    if section_type in ("intro_ambient", "breakdown"):
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.35, z=0.0,
+                            spread=0.02, lfe_send=0.40, volume_gain=0.50, is_stereo=False
+                        )
+                    elif section_type in ("chorus_drop", "climax"):
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.50, z=0.0,
+                            spread=0.02, lfe_send=1.00, volume_gain=1.20, is_stereo=False
+                        )
+                    else:
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.55, z=0.0,
+                            spread=0.02, lfe_send=1.00, volume_gain=1.00, is_stereo=False
+                        )
+                else:
+                    # Baixo melódico ou baixo padrão do modo fast
+                    if section_type in ("intro_ambient", "breakdown"):
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.35, z=0.0,
+                            spread=0.05, lfe_send=0.40, volume_gain=0.80, is_stereo=False
+                        )
+                    elif section_type in ("chorus_drop", "climax"):
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.50, z=0.0,
+                            spread=0.05, lfe_send=1.00, volume_gain=1.15, is_stereo=False
+                        )
+                    elif section_type == "buildup":
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.45, z=0.0,
+                            spread=0.05, lfe_send=0.95, volume_gain=1.05, is_stereo=False
+                        )
+                    else:  # Versos normais
+                        placements[name] = SpatialPlacement(
+                            stem_name=name, x=0.0, y=0.55, z=0.0,
+                            spread=0.05, lfe_send=0.88, volume_gain=1.00, is_stereo=False
+                        )
 
-            # --- 4. INSTRUMENTOS HARMÔNICOS / AMBIÊNCIA / SINTETIZADORES (OTHER) ---
+            # --- 6. AMBIÊNCIA AÉREA (AIR AMBIENCE) ---
+            elif "air" in nl or "ambien" in nl:
+                placements[name] = SpatialPlacement(
+                    stem_name=name, x=0.75, y=0.0, z=0.92,
+                    spread=0.85, lfe_send=0.0,
+                    volume_gain=1.15 if "chorus" in section_type else 1.00,
+                    is_stereo=True
+                )
+
+            # --- 7. INSTRUMENTOS HARMÔNICOS / GUITARRAS / SINTETIZADORES (OTHER / GUITAR_KEYS) ---
             else:
                 if section_type in ("intro_ambient",):
                     # Nuvem envolvente no teto e laterais
@@ -511,9 +642,12 @@ class SongStructureIntelligence:
                         spread=0.75, lfe_send=0.0, volume_gain=0.90, is_stereo=True
                     )
 
-        # --- 5. EFEITO METICULOSO "LAST CHRISTMAS": VOCAL THROW NOS MÓDULOS TRASEIROS DESTACÁVEIS ---
+        # --- 8. EFEITO METICULOSO "LAST CHRISTMAS": VOCAL THROW NOS MÓDULOS TRASEIROS DESTACÁVEIS ---
         if has_vocal:
-            base_vocal_name = next(s.name for s in stems if "vocal" in s.name.lower() or "voice" in s.name.lower())
+            lead_vocal_cand = next((s.name for s in stems if "lead" in s.name.lower() and "vocal" in s.name.lower()), None)
+            if not lead_vocal_cand:
+                lead_vocal_cand = next((s.name for s in stems if "vocal" in s.name.lower() or "voice" in s.name.lower()), "vocals")
+            base_vocal_name = lead_vocal_cand
             throw_instance_name = f"{base_vocal_name}::spatial_throw"
 
             if section_type in ("chorus_drop", "climax"):

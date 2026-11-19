@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QDialog,
     QSlider,
+    QStyle,
     QFrame,
     QTableWidget,
     QTableWidgetItem,
@@ -686,6 +687,18 @@ class MainWindow(QMainWindow):
         self.slider_time.setRange(0, 1000)
         self.slider_time.setValue(0)
         self.slider_time.sliderMoved.connect(self._on_seek_moved)
+        self.slider_time.sliderReleased.connect(lambda: self._on_seek_moved(self.slider_time.value()))
+        # Permite clique direto em qualquer ponto da régua para saltar instantaneamente
+        def _slider_mouse_press(ev):
+            if ev.button() == Qt.LeftButton:
+                val = QStyle.sliderValueFromPosition(
+                    self.slider_time.minimum(), self.slider_time.maximum(),
+                    int(ev.position().x()), self.slider_time.width()
+                )
+                self.slider_time.setValue(val)
+                self._on_seek_moved(val)
+            QSlider.mousePressEvent(self.slider_time, ev)
+        self.slider_time.mousePressEvent = _slider_mouse_press
         layout.addWidget(self.slider_time, stretch=1)
 
         self.lbl_time = QLabel("00:00 / 00:00")
@@ -756,10 +769,51 @@ class MainWindow(QMainWindow):
             # Atualizar agulha da timeline de trechos
             self.timeline_widget.set_current_playback_time(cur_s)
 
+            # Atualizar posicionamento 3D em tempo real na sala e nos cards
             if is_playing:
+                self._update_dynamic_playback_ui(cur_s)
                 self.room_view.set_vu_levels(vu_stems, sub_vu)
             else:
                 self.room_view.set_vu_levels({}, 0.0)
+
+    def _update_dynamic_playback_ui(self, cur_s: float):
+        """Atualiza a sala 3D, agulha, cards e trecho ativo em tempo real com as coordenadas da música."""
+        if not self.timeline_manager or not self.current_stems:
+            return
+
+        has_dynamic_timeline = len(self.timeline_manager.sections) > 1
+        if not has_dynamic_timeline:
+            return
+
+        # 1. Posições 3D contínuas e interpoladas para o instante exato
+        interp_plcs = self.timeline_manager.get_interpolated_placements(cur_s)
+
+        # 2. Atualiza a sala 3D em tempo real (bolinhas se movem pelo espaço)
+        if not self.room_view._is_dragging:
+            self.room_view.set_playback_placements(interp_plcs)
+
+        # 3. Atualiza os cards à esquerda (sliders e textos)
+        if set(self.stem_cards.keys()) != set(interp_plcs.keys()):
+            self.current_placements = interp_plcs
+            self._populate_stems_ui()
+        else:
+            for name, card in self.stem_cards.items():
+                plc = interp_plcs.get(name)
+                if plc:
+                    card.sync_dynamic_state(plc)
+
+        # 4. Sincroniza o trecho ativo na timeline e na caixa suspensa
+        sec = self.timeline_manager.get_section_at_time(cur_s)
+        if sec and sec.id != self.timeline_manager.active_edit_section_id and not self.room_view._is_dragging:
+            self.timeline_manager.active_edit_section_id = sec.id
+            self.timeline_widget.refresh_timeline()
+
+            self.combo_sections.blockSignals(True)
+            for i in range(self.combo_sections.count()):
+                if self.combo_sections.itemData(i) == sec.id:
+                    self.combo_sections.setCurrentIndex(i)
+                    break
+            self.combo_sections.blockSignals(False)
 
     def _copy_placement(self, stem_name: str):
         if stem_name in self.current_placements:
@@ -1147,6 +1201,14 @@ class MainWindow(QMainWindow):
             stem = self._stem_audio_by_instance.get(instance_name) or self._stem_audio_by_instance.get(plc.source_stem_name or instance_name)
             if not stem:
                 continue
+            if "::spatial_throw" in instance_name:
+                stem = copy.copy(stem)
+                stem.display_name = "Vocal Throw (Satélites Traseiros)"
+                stem.color_hex = "#00E5FF"
+            elif "::" in instance_name:
+                suffix = instance_name.split("::")[-1]
+                stem = copy.copy(stem)
+                stem.display_name = f"{stem.display_name} #{suffix}"
             card = StemControlCard(stem, plc)
             card.changed.connect(self._on_stem_card_changed)
             card.selected.connect(self.room_view.set_active_stem)
@@ -1340,6 +1402,19 @@ class MainWindow(QMainWindow):
 
         self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
 
+        # Se não estiver tocando, pula o cursor da timeline e atualiza a pré-visualização 3D para o início do trecho
+        if not self.live_player.is_playing:
+            self.live_player.seek_seconds(sec.start_time_s)
+            self.timeline_widget.set_current_playback_time(sec.start_time_s)
+            tot_s = max(1.0, self.live_player.total_duration_s)
+            self.slider_time.blockSignals(True)
+            self.slider_time.setValue(int((sec.start_time_s / tot_s) * 1000))
+            self.slider_time.blockSignals(False)
+            c_m, c_sec = int(sec.start_time_s // 60), int(sec.start_time_s % 60)
+            t_m, t_sec = int(tot_s // 60), int(tot_s % 60)
+            self.lbl_time.setText(f"{c_m:02d}:{c_sec:02d} / {t_m:02d}:{t_sec:02d}")
+            self._update_dynamic_playback_ui(sec.start_time_s)
+
         # Sincroniza a caixa suspensa sem disparar eventos circulares
         self.combo_sections.blockSignals(True)
         for i in range(self.combo_sections.count()):
@@ -1408,6 +1483,7 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_seek_requested(self, time_s: float):
         self.live_player.seek_seconds(time_s)
+        self._update_dynamic_playback_ui(time_s)
 
     def _toggle_preview_playback(self):
         if not self.current_stems:
@@ -1422,7 +1498,10 @@ class MainWindow(QMainWindow):
 
     def _on_seek_moved(self, val: int):
         ratio = float(val) / 1000.0
+        tot_s = max(1.0, self.live_player.total_duration_s)
+        time_s = ratio * tot_s
         self.live_player.seek(ratio)
+        self._update_dynamic_playback_ui(time_s)
 
     def _on_quick_export_clicked(self):
         if not self.current_stems:

@@ -92,7 +92,7 @@ class RoomView714(QWidget):
             return
 
         plc = self.placements.get(self.active_stem_name)
-        if not plc:
+        if not plc or plc.is_muted or plc.volume_gain <= 0.01:
             self._cached_rays_l = None
             self._cached_rays_r = None
             return
@@ -110,15 +110,58 @@ class RoomView714(QWidget):
             self._cached_rays_l = None
             self._cached_rays_r = None
 
+    def _resolve_stem_descriptor(self, name: str, plc: SpatialPlacement, base_stems: Dict[str, StemTrack]) -> StemTrack:
+        base_name = plc.source_stem_name or (name.split("::")[0] if "::" in name else name)
+        base = base_stems.get(base_name)
+        if not base:
+            base = StemTrack(name, name, "#00E5FF", np.zeros((10, 2), dtype=np.float32), 48000)
+        if "::spatial_throw" in name:
+            return StemTrack(
+                name=name,
+                display_name="Vocal Throw (BL/BR)",
+                color_hex="#00E5FF",
+                audio_data=base.audio_data,
+                sample_rate=base.sample_rate
+            )
+        elif "::" in name:
+            suffix = name.split("::")[-1]
+            return StemTrack(
+                name=name,
+                display_name=f"{base.display_name} #{suffix}",
+                color_hex=base.color_hex,
+                audio_data=base.audio_data,
+                sample_rate=base.sample_rate
+            )
+        return base
+
     def set_stems_and_placements(self, stems: List[StemTrack], placements: Dict[str, SpatialPlacement]):
         """Atualiza a lista de instrumentos e seus posicionamentos espaciais."""
+        self._raw_stems = list(stems)
         base_stems = {s.name: s for s in stems}
-        self.stems = {name: base_stems[plc.source_stem_name or name] for name, plc in placements.items()
-                      if (plc.source_stem_name or name) in base_stems}
+        self.stems = {name: self._resolve_stem_descriptor(name, plc, base_stems)
+                      for name, plc in placements.items()}
         self._stem_colors = {name: QColor(stem.color_hex) for name, stem in self.stems.items()}
         self.placements = placements
         if self.stems and (self.active_stem_name not in self.stems):
             self.active_stem_name = next(iter(self.stems))
+        self._update_rays_cache()
+        self.update()
+
+    def set_playback_placements(self, placements: Dict[str, SpatialPlacement]):
+        """Atualiza as coordenadas 3D em tempo real durante playback ou scrubbing (33-60 FPS)."""
+        if self._is_dragging:
+            return
+
+        # Sincroniza instâncias se chaves mudarem
+        if set(placements.keys()) != set(self.placements.keys()):
+            base_stems = {s.name: s for s in getattr(self, "_raw_stems", [])}
+            self.stems = {
+                name: self._resolve_stem_descriptor(name, plc, base_stems)
+                for name, plc in placements.items()
+            }
+            self._stem_colors = {name: QColor(stem.color_hex) for name, stem in self.stems.items()}
+
+        self.placements = placements
         self._update_rays_cache()
         self.update()
 
@@ -404,10 +447,11 @@ class RoomView714(QWidget):
             plc = self.placements.get(name, SpatialPlacement(name, 0, 0, 0, 0.2, 0, 1))
             is_active = (name == self.active_stem_name)
             is_hovered = (self.hovered_stem_info is not None and self.hovered_stem_info[0] == name)
+            is_muted = plc.is_muted or plc.volume_gain <= 0.01
             base_color = self._stem_colors.get(name)
             if base_color is None:
                 base_color = QColor(stem.color_hex)
-            vu_val = self.stems_vu.get(name, 0.0)
+            vu_val = 0.0 if is_muted else self.stems_vu.get(name, 0.0)
             radius = self.get_visual_radius(plc.z, vu_val)
 
             if plc.is_stereo:
@@ -419,53 +463,57 @@ class RoomView714(QWidget):
                 self._draw_stereo_bridge(painter, sphere_l, sphere_r, base_color, is_active, is_hovered)
 
                 # Desenhar Nós L e R
-                self._draw_single_puck(painter, ground_l, sphere_l, radius, plc.z, vu_val, base_color, is_active, is_hovered, "L")
-                self._draw_single_puck(painter, ground_r, sphere_r, radius, plc.z, vu_val, base_color, is_active, is_hovered, "R")
+                self._draw_single_puck(painter, ground_l, sphere_l, radius, plc.z, vu_val, base_color, is_active, is_hovered, "L", is_muted=is_muted)
+                self._draw_single_puck(painter, ground_r, sphere_r, radius, plc.z, vu_val, base_color, is_active, is_hovered, "R", is_muted=is_muted)
 
                 # Badge Central e Rótulo
                 center_pt = QPointF((sphere_l.x() + sphere_r.x()) / 2.0, (sphere_l.y() + sphere_r.y()) / 2.0)
                 if is_active:
                     painter.setFont(QFont("sans-serif", 7, QFont.Bold))
-                    badge_text = f"🪞 ESTÉREO 7.1.4 ({int(round(plc.z * 100))}%)"
+                    badge_text = (f"🪞 ESTÉREO (Mudo)" if is_muted else f"🪞 ESTÉREO 7.1.4 ({int(round(plc.z * 100))}%)")
                     badge_w = 115.0
                     badge_rect = QRectF(center_pt.x() - badge_w / 2.0, center_pt.y() - radius - 20.0, badge_w, 15.0)
 
-                    painter.setPen(QPen(QColor("#00E5FF"), 1.0))
+                    painter.setPen(QPen(QColor("#718096" if is_muted else "#00E5FF"), 1.0))
                     painter.setBrush(QBrush(QColor(15, 20, 30, 220)))
                     painter.drawRoundedRect(badge_rect, 3.0, 3.0)
 
-                    painter.setPen(QColor("#00E5FF"))
+                    painter.setPen(QColor("#A0AEC0" if is_muted else "#00E5FF"))
                     painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
 
                 # Nome do instrumento abaixo de cada lado ou centralizado
                 painter.setFont(QFont("sans-serif", 8, QFont.Bold if is_active else QFont.Normal))
-                painter.setPen(QColor("#FFFFFF") if is_active else QColor("#A0AEC0"))
+                label_color = QColor("#718096") if is_muted else (QColor("#FFFFFF") if is_active else QColor("#A0AEC0"))
+                painter.setPen(label_color)
                 label_rect = QRectF(center_pt.x() - 70, center_pt.y() + radius + 4, 140, 16)
-                painter.drawText(label_rect, Qt.AlignCenter, f"{stem.display_name} (L / R)")
+                disp_text = f"{stem.display_name} (L / R)" if not is_muted else f"{stem.display_name} (Mudo)"
+                painter.drawText(label_rect, Qt.AlignCenter, disp_text)
 
             else:
                 ground_pt, sphere_pt = self._get_node_positions(plc.x, plc.y, plc.z)
-                self._draw_single_puck(painter, ground_pt, sphere_pt, radius, plc.z, vu_val, base_color, is_active, is_hovered, None)
+                self._draw_single_puck(painter, ground_pt, sphere_pt, radius, plc.z, vu_val, base_color, is_active, is_hovered, None, is_muted=is_muted)
 
                 # Badge de Altura Ativa (quando selecionado)
                 if is_active:
                     painter.setFont(QFont("sans-serif", 7, QFont.Bold))
-                    badge_text = f"▲ TETO {int(round(plc.z * 100))}%" if plc.z > 0.05 else "● CHÃO (0%)"
+                    badge_text = ("● MUDO (0%)" if is_muted else (f"▲ TETO {int(round(plc.z * 100))}%" if plc.z > 0.05 else "● CHÃO (0%)"))
                     badge_w = 70.0
                     badge_rect = QRectF(sphere_pt.x() - badge_w / 2.0, sphere_pt.y() - radius - 20.0, badge_w, 15.0)
 
-                    painter.setPen(QPen(QColor("#00E5FF"), 1.0))
+                    painter.setPen(QPen(QColor("#718096" if is_muted else "#00E5FF"), 1.0))
                     painter.setBrush(QBrush(QColor(15, 20, 30, 220)))
                     painter.drawRoundedRect(badge_rect, 3.0, 3.0)
 
-                    painter.setPen(QColor("#00E5FF"))
+                    painter.setPen(QColor("#A0AEC0" if is_muted else "#00E5FF"))
                     painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
 
                 # Rótulo com Nome do Instrumento
                 painter.setFont(QFont("sans-serif", 8, QFont.Bold if is_active else QFont.Normal))
-                painter.setPen(QColor("#FFFFFF") if is_active else QColor("#A0AEC0"))
+                label_color = QColor("#718096") if is_muted else (QColor("#FFFFFF") if is_active else QColor("#A0AEC0"))
+                painter.setPen(label_color)
                 label_rect = QRectF(sphere_pt.x() - 60, sphere_pt.y() + radius + 3, 120, 16)
-                painter.drawText(label_rect, Qt.AlignCenter, stem.display_name)
+                disp_text = stem.display_name if not is_muted else f"{stem.display_name} (Mudo)"
+                painter.drawText(label_rect, Qt.AlignCenter, disp_text)
 
     def _draw_stereo_bridge(self, painter: QPainter, pt_l: QPointF, pt_r: QPointF, color: QColor, is_active: bool, is_hovered: bool):
         """Desenha a conexão de ponte estéreo cintilante entre o lado esquerdo e direito."""
@@ -493,7 +541,8 @@ class RoomView714(QWidget):
         base_color: QColor,
         is_active: bool,
         is_hovered: bool,
-        puck_side_badge: Optional[str]
+        puck_side_badge: Optional[str],
+        is_muted: bool = False
     ):
         """Renderiza uma bolinha esférica individual com sombra, haste e realce de altura."""
         # 1. Projeção de Chão & Haste Vertical (Pseudo-3D)
@@ -501,15 +550,16 @@ class RoomView714(QWidget):
             shadow_w = 12.0 + (1.0 - z) * 6.0
             shadow_h = shadow_w * 0.45
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(0, 0, 0, 160)))
+            painter.setBrush(QBrush(QColor(0, 0, 0, 70 if is_muted else 160)))
             painter.drawEllipse(ground_pt, shadow_w, shadow_h)
 
-            pen_tether = QPen(QColor(255, 255, 255, int(80 + z * 120)), 1.2, Qt.DashLine)
+            tether_alpha = int((80 + z * 120) * (0.35 if is_muted else 1.0))
+            pen_tether = QPen(QColor(255, 255, 255, tether_alpha), 1.2, Qt.DashLine)
             painter.setPen(pen_tether)
             painter.drawLine(ground_pt, sphere_pt)
 
-        # 2. Anéis de Elevação ao Teto
-        if z > 0.35:
+        # 2. Anéis de Elevação ao Teto (somente se não mudo)
+        if z > 0.35 and not is_muted:
             elev_alpha = int(z * 170)
             pen_elev = QPen(QColor(99, 179, 237, elev_alpha), 1.2, Qt.DashLine)
             painter.setPen(pen_elev)
@@ -518,8 +568,8 @@ class RoomView714(QWidget):
             if z > 0.75:
                 painter.drawEllipse(sphere_pt, radius + 10.0, radius + 10.0)
 
-        # 3. Pulsação Reativa de VU Meter no Nó
-        if vu_val > 0.06:
+        # 3. Pulsação Reativa de VU Meter no Nó (somente se não mudo)
+        if vu_val > 0.06 and not is_muted:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), int(vu_val * 32)))
             painter.drawEllipse(sphere_pt, radius + vu_val * 16.0, radius + vu_val * 16.0)
@@ -530,26 +580,35 @@ class RoomView714(QWidget):
             painter.setBrush(QColor(0, 229, 255, 24))
             painter.drawEllipse(sphere_pt, radius + 14.0, radius + 14.0)
 
-        # 5. Corpo da esfera sem QGradient: evita setColorAt() na pintura frequente.
-
-        if is_active:
+        # 5. Corpo da esfera sem QGradient: sólida quando viva, translúcida tracejada quando muda
+        if is_muted:
+            painter.setPen(QPen(QColor(base_color.red(), base_color.green(), base_color.blue(), 130), 1.2, Qt.DashLine))
+            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 45))
+        elif is_active:
             painter.setPen(QPen(QColor("#00E5FF"), 2.5))
+            painter.setBrush(base_color)
         elif is_hovered:
             painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
+            painter.setBrush(base_color)
         else:
             painter.setPen(QPen(QColor(255, 255, 255, 60), 1.0))
+            painter.setBrush(base_color)
 
-        painter.setBrush(base_color)
         painter.drawEllipse(sphere_pt, radius, radius)
 
-        # 6. Letra de Lado (L/R) ou Porcentagem de Altura
-        painter.setPen(QColor("#FFFFFF"))
+        # 6. Letra de Lado (L/R) ou Porcentagem de Altura ou Indicador Mudo
         painter.setFont(QFont("sans-serif", 8, QFont.Bold))
         text_rect = QRectF(sphere_pt.x() - radius, sphere_pt.y() - radius, radius * 2, radius * 2)
 
-        if puck_side_badge:
+        if is_muted:
+            painter.setPen(QColor(255, 255, 255, 110))
+            badge_muted = f"{puck_side_badge} ✕" if puck_side_badge else "✕"
+            painter.drawText(text_rect, Qt.AlignCenter, badge_muted)
+        elif puck_side_badge:
+            painter.setPen(QColor("#FFFFFF"))
             painter.drawText(text_rect, Qt.AlignCenter, puck_side_badge)
         elif radius >= 16.0:
+            painter.setPen(QColor("#FFFFFF"))
             pct_text = f"{int(round(z * 100))}%"
             painter.drawText(text_rect, Qt.AlignCenter, pct_text)
 

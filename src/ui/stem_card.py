@@ -401,6 +401,16 @@ class StemControlCard(QFrame):
         self.slider_pos_y.blockSignals(False)
         self.slider_z.blockSignals(False)
 
+    def sync_dynamic_state(self, placement: SpatialPlacement):
+        """Atualização visual suave em tempo real durante playback sem interrupção de interação."""
+        # Se o usuário estiver segurando algum slider manualmente, não sobrescrever
+        if (self.slider_pan.isSliderDown() or self.slider_pos_y.isSliderDown() or
+            self.slider_z.isSliderDown() or self.slider_vol.isSliderDown() or
+            self.slider_lfe.isSliderDown()):
+            return
+        self.placement = placement
+        self.sync_from_placement()
+
     def sync_from_placement(self):
         """Atualiza todos os sliders e botões para refletir alterações completas."""
         self.sync_coords_from_placement(self.placement.x, self.placement.y, self.placement.z)

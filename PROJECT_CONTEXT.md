@@ -153,6 +153,22 @@ flowchart TD
 
 ## 7. Histórico de Versões e Decisões Críticas Recentes
 
+- **2026-11-19 (v1.8.2 — Animação 3D em Tempo Real da Sala 7.1.4, Mapeamento Cirúrgico e Desbloqueio do Vocal Throw):**
+  - **Pré-visualização Tridimensional Ativa em Tempo Real (`RoomView714`):**
+    - Implementado `set_playback_placements` a 33–60 FPS, permitindo que todas as bolinhas de instrumentos e vozes se movimentem ativamente pela sala acústica enquanto a faixa toca ou durante o scrubbing do playhead na timeline.
+    - Os raios de energia acústica VBAP agora acompanham a posição dinâmica das fontes sonoras em tempo real, ligando-as aos alto-falantes ativados (soundbar frontal, surround lateral, teto e satélites traseiros).
+    - Sincronização em tempo real dos faders, coordenadas e botões nos cards à esquerda (`StemControlCard.sync_dynamic_state`).
+    - Salto imediato de pré-visualização ao clicar em qualquer trecho da timeline ou na barra de tempo.
+  - **Renderização Visual de Objetos Silenciados vs. Ativos:**
+    - Instâncias temporariamente silenciadas (como o vocal throw durante versos secos ou a bateria em breakdowns) são desenhadas em modo translúcido tracejado com indicador `✕`.
+    - Ao entrar em um refrão ou clímax, a bolinha ganha cor sólida vívida, halo de energia e raios acústicos instantâneos.
+  - **Mapeamento 3D Especializado para Separação Cirúrgica (8-12 Camadas):**
+    - Mapeamento estrito e musical para todos os 9 stems cirúrgicos: `lead_vocal` (âncora frontal no verso, riser ao teto no build-up, suspensão celestial no breakdown), `backing_vocals` (asas estéreo laterais no verso, 360° no refrão), `cymbals_hihat` (teto físico nos 4 canais de altura), `kick` (chão frontal com 100% LFE send), `snare` (chão no verso, subindo ao teto no build-up), `sub_bass_lfe` (puro mono 100% LFE), e `air_ambience` (dossel contínuo no teto).
+  - **Desbloqueio de Áudio Dinâmico no LiveSpatialPlayer:**
+    - Corrigido o portão estático de mute que impedia o playback do vocal throw (`vocals::spatial_throw` / `lead_vocal::spatial_throw`) nos refrões. A automação dinâmica por trechos agora governa as matrizes de ganho sem corte estático prévio.
+  - **Validação de Testes:**
+    - Suíte expandida para 32 testes unitários automatizados com 100% de aprovação.
+
 - **2026-11-19 (v1.8.1 — Particionamento Frase a Frase Inteligente e Movimentação Espacial 3D Ativa):**
   - **Particionamento Musical Granular (Subdivisão de Frases 8s a 20s):**
     - Substituída a partição macro percentual por detecção de novidade de sinal e fluxo espectral ($\Delta E$), cortes de percussão (drop gaps) e pausas de fraseado vocal (VAD).

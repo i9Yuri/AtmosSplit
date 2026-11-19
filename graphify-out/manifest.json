@@ -144,9 +144,9 @@
     "semantic_hash": ""
   },
   "src/spatial/live_player.py": {
-    "mtime": 1795123132.8109505,
-    "seen": 1795123523.5421197,
-    "ast_hash": "12c367bbaa4111416330dcacf1dfc676",
+    "mtime": 1795129368.7676525,
+    "seen": 1795130583.0122776,
+    "ast_hash": "f3102a52a01ac52e3ee6365c4abe130a",
     "semantic_hash": ""
   },
   "src/spatial/master_renderer.py": {
@@ -174,21 +174,21 @@
     "semantic_hash": ""
   },
   "src/ui/main_window.py": {
-    "mtime": 1795123320.8707018,
-    "seen": 1795123523.5421412,
-    "ast_hash": "afbdfc9ebcc102eb419961aac16d4ff5",
+    "mtime": 1795130386.455998,
+    "seen": 1795130583.012297,
+    "ast_hash": "a06d9793e28ecbc3e398d46e7988a84d",
     "semantic_hash": ""
   },
   "src/ui/room_view_714.py": {
-    "mtime": 1795118301.7139761,
-    "seen": 1795123523.5421448,
-    "ast_hash": "6ea3a18f186e2d62924f5f660af4280e",
+    "mtime": 1795130332.1904926,
+    "seen": 1795130583.0123005,
+    "ast_hash": "4936ff4ff81d98287cd7e95c8987b9b9",
     "semantic_hash": ""
   },
   "src/ui/stem_card.py": {
-    "mtime": 1795118250.307481,
-    "seen": 1795123523.542148,
-    "ast_hash": "667ea5c86657304c93b1556e61dfa6a1",
+    "mtime": 1795129474.1305168,
+    "seen": 1795130583.0123038,
+    "ast_hash": "1f3a5bbad09c73d84cee03960bad0ae5",
     "semantic_hash": ""
   },
   "src/ui/timeline_widget.py": {
@@ -204,15 +204,15 @@
     "semantic_hash": ""
   },
   "tests/test_atmossplit.py": {
-    "mtime": 1795125145.2730792,
-    "seen": 1795125228.2512748,
-    "ast_hash": "241ed6f1db1427747e762adc1968e00d",
+    "mtime": 1795130492.1909826,
+    "seen": 1795130583.0123127,
+    "ast_hash": "8d40ed73954ba14e4254e805a180e6b5",
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1795125200.5956168,
-    "seen": 1795125228.2512784,
-    "ast_hash": "9366f42cfe49336be1a5b8f7d112d028",
+    "mtime": 1795130543.1104567,
+    "seen": 1795130583.0123162,
+    "ast_hash": "e66767333602234e9b9e0e1c98d8092d",
     "semantic_hash": ""
   },
   "ENVIRONMENT_REPORT.md": {
@@ -222,9 +222,9 @@
     "semantic_hash": ""
   },
   "PROJECT_CONTEXT.md": {
-    "mtime": 1795125219.1687973,
-    "seen": 1795125228.2512848,
-    "ast_hash": "8b47d3165fb56b5a9ae79479e30a8fd7",
+    "mtime": 1795130562.3196354,
+    "seen": 1795130583.0123222,
+    "ast_hash": "b195af35d641799721e604d0d25bd876",
     "semantic_hash": ""
   },
   "README.md": {
@@ -252,9 +252,9 @@
     "semantic_hash": ""
   },
   "src/spatial/song_intelligence.py": {
-    "mtime": 1795125119.61583,
-    "seen": 1795125228.2512493,
-    "ast_hash": "5686f8f5bb45cb08e5ee8ec3d329ebb6",
+    "mtime": 1795130229.758539,
+    "seen": 1795130583.012285,
+    "ast_hash": "968c014a0d0fce07ef5c71542cccc95c",
     "semantic_hash": ""
   }
 }

@@ -1075,6 +1075,112 @@ def test_timeline_interactive_boundary_drag_and_minimap():
     app.processEvents()
 
 
+def test_dynamic_playback_ui_preview_and_movement():
+    """Valida que o preview da UI na sala 3D e nos cards se move ativamente durante playback/seek."""
+    from PySide6.QtWidgets import QApplication
+    from src.spatial.timeline_manager import SpatialTimelineManager
+    from src.spatial.auto_director import SpatialPlacement
+    from src.separation.stem_engine import StemTrack
+    from src.ui.room_view_714 import RoomView714
+
+    app = QApplication.instance() or QApplication(["test_ui_movement"])
+
+    sr = 48000
+    stem_v = StemTrack("vocals", "Voz", "#00E5FF", np.zeros((sr, 2), dtype=np.float32), sr)
+    stem_o = StemTrack("other", "Outros", "#D500F9", np.zeros((sr, 2), dtype=np.float32), sr)
+
+    # Seção 1 (Verso): Voz ancorada na frente (y=0.98, z=0.0)
+    plc_sec1 = {
+        "vocals": SpatialPlacement("vocals", x=0.0, y=0.98, z=0.0, spread=0.05, lfe_send=0.0, volume_gain=1.0),
+        "other": SpatialPlacement("other", x=0.70, y=0.20, z=0.10, spread=0.35, lfe_send=0.0, volume_gain=1.0, is_stereo=True),
+    }
+    # Seção 2 (Refrão): Voz aberta, sintetizadores 360° e vocal throw atrás
+    plc_sec2 = {
+        "vocals": SpatialPlacement("vocals", x=0.0, y=0.95, z=0.15, spread=0.25, lfe_send=0.0, volume_gain=1.15),
+        "other": SpatialPlacement("other", x=0.88, y=-0.25, z=0.45, spread=0.75, lfe_send=0.10, volume_gain=1.15, is_stereo=True),
+        "vocals::spatial_throw": SpatialPlacement("vocals::spatial_throw", x=0.72, y=-0.82, z=0.50, spread=0.55, lfe_send=0.0, volume_gain=1.35, is_stereo=True, source_stem_name="vocals"),
+    }
+
+    tm = SpatialTimelineManager(60.0, plc_sec1)
+    new_sec = tm.split_section_at(25.0)
+    new_sec.placements = plc_sec2
+
+    room = RoomView714()
+    room.set_stems_and_placements([stem_v, stem_o], plc_sec1)
+
+    # 1. No tempo 5.0s (Verso), room_view deve ter y ~ 0.98 e sem vocal throw
+    plcs_t5 = tm.get_interpolated_placements(5.0)
+    room.set_playback_placements(plcs_t5)
+    assert room.placements["vocals"].y >= 0.95
+    assert room.placements["vocals"].z <= 0.05
+    assert "vocals::spatial_throw" not in room.placements or room.placements["vocals::spatial_throw"].volume_gain == 0.0
+
+    # 2. No tempo 35.0s (Refrão), room_view DEVE ter mudado de posição e ter o vocal throw ativo nos satélites traseiros!
+    plcs_t35 = tm.get_interpolated_placements(35.0)
+    room.set_playback_placements(plcs_t35)
+    assert "vocals::spatial_throw" in room.placements, "Vocal throw deve aparecer dinamicamente na sala durante o refrão"
+    assert room.placements["vocals::spatial_throw"].y <= -0.75, "Vocal throw deve estar posicionado nos módulos traseiros"
+    assert room.placements["other"].y < 0.0, "Sintetizadores devem ter se movido para a traseira e lados 360°"
+    assert room.placements["other"].z >= 0.40, "Sintetizadores devem ter subido no eixo Z de altura"
+
+    room.deleteLater()
+    app.processEvents()
+
+
+def test_surgical_stems_intelligence_and_room_mute_visuals():
+    """Valida posicionamento 3D para 9 stems cirúrgicos e renderização de nós mudos/ativos."""
+    from PySide6.QtWidgets import QApplication
+    from src.spatial.song_intelligence import SongStructureIntelligence
+    from src.spatial.auto_director import DirectorPreset
+    from src.separation.stem_engine import StemTrack
+    from src.ui.room_view_714 import RoomView714
+
+    app = QApplication.instance() or QApplication(["test_surgical"])
+    sr = 48000
+    stems = [
+        StemTrack("lead_vocal", "Voz Principal", "#00E5FF", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("backing_vocals", "Coro", "#1DE9B6", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("kick", "Bumbo", "#FF3D00", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("snare", "Caixa", "#FF9100", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("cymbals_hihat", "Pratos", "#FFEA00", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("sub_bass_lfe", "Sub-Grave", "#D50000", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("melodic_bass", "Baixo Melódico", "#FF6D00", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("guitar_keys", "Guitarras", "#00E676", np.zeros((sr, 2), dtype=np.float32), sr),
+        StemTrack("air_ambience", "Ambiência Aérea", "#76FF03", np.zeros((sr, 2), dtype=np.float32), sr),
+    ]
+
+    sections = SongStructureIntelligence.analyze_and_arrange(stems, 120.0, DirectorPreset.BALANCED)
+    assert len(sections) >= 6
+
+    # Testar que pratos estão no teto
+    verse_sec = next(s for s in sections if "verso" in s.name.lower())
+    cym = verse_sec.placements.get("cymbals_hihat")
+    assert cym is not None
+    assert cym.z >= 0.70, "Pratos/hi-hats devem estar posicionados no teto (canais de altura)"
+
+    # Testar que backing_vocals não estão no centro
+    bv = verse_sec.placements.get("backing_vocals")
+    assert bv is not None
+    assert bv.is_stereo is True
+    assert abs(bv.x) >= 0.50, "Backing vocals devem estar afastados para as laterais"
+
+    # Testar que kick tem 100% LFE e z=0
+    k = verse_sec.placements.get("kick")
+    assert k is not None
+    assert k.lfe_send == 1.0
+    assert k.z == 0.0
+
+    # Testar RoomView714 com nomes resolvidos
+    room = RoomView714()
+    room.set_stems_and_placements(stems, verse_sec.placements)
+    assert "lead_vocal::spatial_throw" in room.stems
+    assert room.stems["lead_vocal::spatial_throw"].display_name == "Vocal Throw (BL/BR)"
+
+    room.deleteLater()
+    app.processEvents()
+
+
+
 
 
 

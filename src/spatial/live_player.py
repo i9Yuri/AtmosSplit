@@ -634,7 +634,9 @@ class LiveSpatialPlayer:
             for name, source_name in sources_map.items():
                 if any_solo and not dsp.is_solo.get(name, False):
                     continue
-                if dsp.is_muted.get(name, False):
+                # Se não temos automação dinâmica, checamos o mute estático.
+                # Com automação dinâmica, o muting é governado continuamente pelos vetores de ganhos da timeline.
+                if not has_dynamic_timeline and dsp.is_muted.get(name, False):
                     continue
 
                 ch_l_full = dsp.cached_ch_l.get(source_name)
@@ -647,7 +649,7 @@ class LiveSpatialPlayer:
                 if slice_len <= 0 or slice_len > block_714.shape[0]:
                     continue
 
-                gain_vol = dsp.vol_gains.get(name, 1.0)
+                gain_vol = 1.0 if has_dynamic_timeline else dsp.vol_gains.get(name, 1.0)
                 l_slice = ch_l_full[start_idx:start_idx + slice_len] * gain_vol
                 r_slice = ch_r_full[start_idx:start_idx + slice_len] * gain_vol
 
@@ -670,8 +672,13 @@ class LiveSpatialPlayer:
                 if g_r is None or len(g_r) < 12:
                     g_r = dsp.cached_vbap_gains_r.get(name) or g_l
 
-                is_stereo = dsp.is_stereo.get(name, False)
-                if is_stereo:
+                # Se a energia dos ganhos for desprezível (objeto mutado na seção), pula acumulação
+                if float(np.max(g_l)) < 1e-4 and float(np.max(g_r)) < 1e-4:
+                    continue
+
+                # Acumulação 7.1.4: se g_l e g_r diferem, trata como estéreo dinâmico
+                diff_lr = float(np.max(np.abs(g_l - g_r)))
+                if diff_lr > 1e-3 or dsp.is_stereo.get(name, False):
                     for ch in range(12):
                         gain_l = float(g_l[ch])
                         gain_r = float(g_r[ch])

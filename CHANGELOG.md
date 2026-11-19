@@ -2,6 +2,30 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.8.2] - 2026-11-19
+### Adicionado & Aprimorado (Animação 3D em Tempo Real da Sala 7.1.4, Inteligência Cirúrgica de 9 Camadas e Vocal Throw Desbloqueado)
+- **Pré-visualização Tridimensional em Tempo Real na Sala 7.1.4 (`RoomView714`):**
+  - Implementado `set_playback_placements` a 33–60 FPS, permitindo que as bolinhas de instrumentos e vozes se movimentem ativamente pela sala acústica enquanto a música toca ou durante o scrubbing do playhead.
+  - Os raios de energia acústica VBAP agora acompanham a posição dinâmica das fontes sonoras em tempo real, ligando-as aos alto-falantes ativados (soundbar frontal, surround lateral, teto e satélites traseiros).
+  - Sincronização em tempo real dos faders, coordenadas e botões nos cards à esquerda (`StemControlCard.sync_dynamic_state`) sem conflito com manipulações manuais do usuário.
+  - Salto imediato de pré-visualização ao clicar em qualquer trecho da timeline ou na barra de tempo.
+- **Renderização Visual de Objetos Silenciados vs. Ativos:**
+  - Instâncias temporariamente silenciadas (como o vocal throw durante versos secos ou a bateria em breakdowns) são desenhadas em modo translúcido tracejado com indicador `✕`.
+  - Ao entrar em um refrão ou clímax, a bolinha ganha cor sólida vívida, halo de energia e raios acústicos instantâneos.
+- **Mapeamento 3D Especializado para Separação Cirúrgica (8-12 Camadas):**
+  - Mapeamento estrito e musical para todos os 9 stems cirúrgicos:
+    - `lead_vocal`: âncora frontal central íntima e seca ($y=0.98, z=0.0$) no verso, riser ao teto no build-up ($z=0.52$) e suspensão celestial no breakdown ($y=0.20, z=0.72$).
+    - `backing_vocals`: asas estéreo laterais ($x=\pm 0.70, y=-0.10, z=0.35$) no verso mantendo o centro limpo, e abraço envolvente 360° ($x=\pm 0.88, y=-0.35, z=0.55$) no refrão.
+    - `cymbals_hihat`: direcionado aos 4 alto-falantes de altura físicos no teto ($z=0.78$ a $0.88$, $x=\pm 0.65$) em todas as seções.
+    - `kick`: ancorado no chão frontal ($y=0.75, z=0.0$) com 100% de LFE send para o subwoofer de 10".
+    - `snare`: firme no chão ($y=0.68, z=0.08$) no verso, escalando ao teto ($z=0.68$) em viradas e build-up.
+    - `sub_bass_lfe`: pure mono central com 100% LFE.
+    - `air_ambience`: dossel aéreo contínuo no teto ($z=0.92$).
+- **Desbloqueio de Áudio Dinâmico no LiveSpatialPlayer:**
+  - Corrigido o portão estático de mute que impedia o playback do vocal throw (`vocals::spatial_throw` / `lead_vocal::spatial_throw`) nos refrões. A automação dinâmica por trechos agora governa as matrizes de ganho sem corte estático prévio.
+- **Validação de Testes:**
+  - Suíte expandida para 32 testes unitários automatizados com 100% de aprovação.
+
 ## [1.8.1] - 2026-11-19
 ### Aprimorado (Particionamento Frase a Frase Inteligente e Movimentação Espacial 3D Dinâmica em Todos os Objetos)
 - **Particionamento Musical Granular e Fraseado Autônomo:**
