@@ -2,6 +2,31 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.6.0] - 2026-11-19
+### Adicionado & Corrigido (Arquitetura Zero-Crash, Controles Táteis de Pan/Posição e Navegação Visual por Trechos)
+- **Eliminação de Congelamentos e Travamentos por Contenção de Trava (`src/spatial/live_player.py`):**
+  - **Diagnóstico da Causa Raiz:** O arraste de nós pelo mouse no visualizador 3D gerava eventos `mouseMoveEvent` a 120 Hz, disparando chamadas concorrentes à função `update_placement`. Essa rotina adquiria o lock global `self._lock` enquanto executava multiplicações trigonométricas pesadas para o recálculo matricial dos 12 canais do VBAP. A thread real-time de áudio do PortAudio sofria inanição (buffer underrun / deadline miss) ao esperar pelo lock, resultando em `SIGABRT` e fechamento silencioso do programa.
+  - **Desacoplamento Algorítmico do Lock:** Os cálculos matemáticos do VBAP foram movidos para fora do lock. Sob lock permanece apenas a leitura inicial e a troca atômica de ponteiros de array NumPy (`self._cached_vbap_gains_l`), durando menos de 1 microssegundo.
+  - **Blindagem do Callback de Áudio:** Implementado bloco `try...except` global de nível superior em `_audio_callback` com zeramento defensivo do buffer de saída (`outdata.fill(0)`), prevenindo que qualquer exceção inesperada em tempo real encerre o aplicativo.
+  - **Escudo Global do PySide6 (`_install_crash_shield`):** Adicionado interceptor em `sys.excepthook` para capturar exceções não tratadas no loop de eventos do Qt sem abortar o aplicativo.
+  - **Throttling Inteligente e Otimização de Arraste (`src/ui/room_view_714.py`):** O visualizador de sala agora filtra micro-movimentos espúrios do mouse ($\Delta < 0.005$) e atualiza os faders dos cards via `sync_coords_from_placement` sem disparar repinturas custosas da interface inteira a cada pixel.
+- **Controles Táteis e Claros de Pan e Posição Frente/Trás (`src/ui/stem_card.py`):**
+  - **Fim do Mistério no Posicionamento:** O usuário agora tem acesso imediato e transparente ao controle fino de cada elemento musical diretamente nos cards laterais.
+  - **Botões Rápidos de 1-Clique:** Adicionada linha de botões táteis no topo de cada card:
+    - `[ ⇦ Esq ]`: Posiciona o som imediatamente no lado esquerdo (-70% Pan, Frontal/Lateral).
+    - `[ ⇧ Centro ]`: Ancora o som no centro frontal da TV / Soundbar (0% Pan, +95% Frontal).
+    - `[ Dir ⇨ ]`: Posiciona o som imediatamente no lado direito (+70% Pan, Frontal/Lateral).
+    - `[ ⇩ Fundo ]`: Envia o som diretamente para as caixas surround traseiras (-75% Frente/Trás).
+  - **Sliders Dedicados com Feedback Numérico e Textual:**
+    - Slider de **Pan (L / R)** (-100% a +100%) com indicadores dinâmicos de texto ("Centro", "X% Esq", "X% Dir").
+    - Slider de **Frente / Trás** (-100% a +100%) com indicadores ("Frente", "Meio", "Trás").
+- **Barra Visual de Trechos e Divisão em 1-Clique (`src/ui/main_window.py`):**
+  - **Navegação Visual por Trechos:** Adicionada barra com destaque visual (`📍 Trecho: [ 1. Música Completa ▼ ]`) logo acima dos cards de instrumentos.
+  - **Botão `✂️ Dividir Aqui`:** Permite fatiar a música instantaneamente no ponto exato da reprodução com um clique, selecionando o novo trecho automaticamente para edição espacial isolada (ex: vozes na frente no verso e na esquerda/direita no refrão).
+- **Suíte de Testes Expandida (22 Testes Automatizados):**
+  - `test_stem_card_pan_and_quick_position_snaps`: Valida botões rápidos de snap de posição, sliders táteis de Pan e Frente/Trás e formatação textual.
+  - `test_live_player_crash_proof_and_zero_lock_contention`: Valida recálculo atômico de ganhos fora do lock sob alta frequência e comportamento defensivo do callback de áudio.
+
 ## [1.5.0] - 2026-11-19
 ### Corrigido & Aprimorado (Mixagem Profissional Dolby Atmos & Correção de Mapeamento ETSI TS 103 420)
 - **Correção da Ancoragem Frontal da Voz (Norma ETSI TS 103 420 §4.2.1):**

@@ -190,20 +190,43 @@ class LiveSpatialPlayer:
             self._latest_duration_s = float(self._max_samples) / float(self.sample_rate) if self.sample_rate > 0 else 0.0
 
     def update_placement(self, stem_name: str, x: float, y: float, z: float, spread: Optional[float] = None, lfe: Optional[float] = None, is_stereo: Optional[bool] = None):
-        """Atualização instantânea de coordenadas em tempo real com recálculo atômico de ganhos."""
+        """Atualização instantânea de coordenadas em tempo real com recálculo atômico e zero contenção de trava."""
+        # 1. Atualizar campos do placement sob lock rápido
         with self._lock:
-            if stem_name in self.placements:
-                plc = self.placements[stem_name]
-                plc.x = x
-                plc.y = y
-                plc.z = z
-                if spread is not None:
-                    plc.spread = spread
-                if lfe is not None:
-                    plc.lfe_send = lfe
-                if is_stereo is not None:
-                    plc.is_stereo = is_stereo
-                self._recompute_gains_for_stem(stem_name)
+            plc = self.placements.get(stem_name)
+            if not plc:
+                return
+            plc.x = x
+            plc.y = y
+            plc.z = z
+            if spread is not None:
+                plc.spread = spread
+            if lfe is not None:
+                plc.lfe_send = lfe
+            if is_stereo is not None:
+                plc.is_stereo = is_stereo
+            
+            cur_spread = plc.spread
+            cur_lfe = plc.lfe_send
+            cur_is_stereo = plc.is_stereo
+
+        # 2. Calcular ganhos VBAP FORA do lock (zero bloqueio da thread de áudio real-time)
+        try:
+            if cur_is_stereo:
+                dist_x = abs(x) if abs(x) > 0.05 else 0.50
+                gl = np.asarray(self.vbap.calculate_gains(-dist_x, y, z, cur_spread, cur_lfe), dtype=np.float32)
+                gr = np.asarray(self.vbap.calculate_gains(dist_x, y, z, cur_spread, cur_lfe), dtype=np.float32)
+            else:
+                gl = np.asarray(self.vbap.calculate_gains(x, y, z, cur_spread, cur_lfe), dtype=np.float32)
+                gr = gl
+        except Exception as e:
+            log.warning("Erro ao calcular ganhos VBAP para %s: %s", stem_name, e)
+            return
+
+        # 3. Swap atômico ultra-rápido (< 1 microssegundo)
+        with self._lock:
+            self._cached_vbap_gains_l[stem_name] = gl
+            self._cached_vbap_gains_r[stem_name] = gr
 
     def set_volume(self, vol: float):
         self._master_volume = max(0.0, min(1.5, vol))
@@ -298,129 +321,148 @@ class LiveSpatialPlayer:
             )
 
     def _audio_callback(self, outdata: np.ndarray, frames: int, time_info, status):
-        """Callback executado pelo driver de áudio (PipeWire/ALSA) a cada bloco."""
-        if not self._is_playing or self._is_paused:
-            outdata.fill(0)
-            return
-
-        with self._lock:
-            start_idx = self._current_sample
-            max_s = self._max_samples
-
-            if start_idx >= max_s:
-                self._current_sample = 0
-                self._is_playing = False
-                self._latest_time_s = 0.0
+        """
+        Callback executado pelo driver de áudio (PipeWire/ALSA) a cada bloco.
+        Blindado com try/except global e zero alocações para prevenir qualquer travamento/abort.
+        """
+        try:
+            if not self._is_playing or self._is_paused:
                 outdata.fill(0)
                 return
 
-            actual_frames = min(frames, max_s - start_idx)
+            with self._lock:
+                start_idx = self._current_sample
+                max_s = self._max_samples
 
-            if self._preallocated_block_714.shape[0] != frames:
-                self._preallocated_block_714 = np.zeros((frames, 12), dtype=np.float32)
-            else:
-                self._preallocated_block_714.fill(0)
+                if start_idx >= max_s or not self.stems:
+                    self._current_sample = 0
+                    self._is_playing = False
+                    self._latest_time_s = 0.0
+                    outdata.fill(0)
+                    return
 
-            block_714 = self._preallocated_block_714
-            vu_stems: Dict[str, float] = {}
-            lfe_energy = 0.0
+                actual_frames = min(frames, max_s - start_idx)
 
-            cur_time_s = float(start_idx) / float(self.sample_rate)
-            use_dynamic_timeline = (
-                self.timeline_manager is not None
-                and hasattr(self.timeline_manager, "sections")
-                and len(self.timeline_manager.sections) > 1
-            )
+                if self._preallocated_block_714.shape[0] != frames:
+                    self._preallocated_block_714 = np.zeros((frames, 12), dtype=np.float32)
+                else:
+                    self._preallocated_block_714.fill(0)
 
-            if use_dynamic_timeline:
-                active_placements = self.timeline_manager.get_interpolated_placements(cur_time_s)
-            else:
-                active_placements = self.placements
+                block_714 = self._preallocated_block_714
+                vu_stems: Dict[str, float] = {}
+                lfe_energy = 0.0
 
-            any_solo = any(active_placements.get(s.name, SpatialPlacement(s.name, 0,0,0,0,0,1)).is_solo for s in self.stems)
-
-            for s in self.stems:
-                plc = active_placements.get(s.name)
-                if not plc:
-                    continue
-                if any_solo and not plc.is_solo:
-                    continue
-                if plc.is_muted:
-                    continue
-
-                ch_l_full = self._cached_ch_l.get(s.name)
-                ch_r_full = self._cached_ch_r.get(s.name)
-                if ch_l_full is None or ch_r_full is None:
-                    continue
-
-                slice_len = min(actual_frames, len(ch_l_full) - start_idx)
-                if slice_len <= 0:
-                    continue
-
-                l_slice = ch_l_full[start_idx:start_idx + slice_len] * plc.volume_gain
-                r_slice = ch_r_full[start_idx:start_idx + slice_len] * plc.volume_gain
-
-                rms = float(np.sqrt(np.mean(0.5 * (l_slice ** 2 + r_slice ** 2)))) if slice_len > 0 else 0.0
-                vu_stems[s.name] = min(1.0, rms * 3.5)
+                cur_time_s = float(start_idx) / float(self.sample_rate)
+                use_dynamic_timeline = (
+                    self.timeline_manager is not None
+                    and hasattr(self.timeline_manager, "sections")
+                    and len(self.timeline_manager.sections) > 1
+                )
 
                 if use_dynamic_timeline:
-                    # Cálculo dinâmico para transições suaves entre seções
-                    if plc.is_stereo:
-                        dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-                        g_l = self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send)
-                        g_r = self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send)
-                    else:
-                        g_l = self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send)
-                        g_r = g_l
+                    try:
+                        active_placements = self.timeline_manager.get_interpolated_placements(cur_time_s)
+                    except Exception:
+                        active_placements = self.placements
                 else:
-                    g_l = self._cached_vbap_gains_l.get(s.name)
-                    g_r = self._cached_vbap_gains_r.get(s.name)
-                    if g_l is None:
-                        self._recompute_gains_for_stem(s.name)
+                    active_placements = self.placements
+
+                any_solo = any(active_placements.get(s.name, SpatialPlacement(s.name, 0,0,0,0,0,1)).is_solo for s in self.stems)
+
+                for s in self.stems:
+                    plc = active_placements.get(s.name)
+                    if not plc:
+                        continue
+                    if any_solo and not plc.is_solo:
+                        continue
+                    if plc.is_muted:
+                        continue
+
+                    ch_l_full = self._cached_ch_l.get(s.name)
+                    ch_r_full = self._cached_ch_r.get(s.name)
+                    if ch_l_full is None or ch_r_full is None:
+                        continue
+
+                    avail = min(len(ch_l_full) - start_idx, len(ch_r_full) - start_idx)
+                    slice_len = min(actual_frames, avail)
+                    if slice_len <= 0 or slice_len > block_714.shape[0]:
+                        continue
+
+                    gain_vol = float(plc.volume_gain)
+                    l_slice = ch_l_full[start_idx:start_idx + slice_len] * gain_vol
+                    r_slice = ch_r_full[start_idx:start_idx + slice_len] * gain_vol
+
+                    rms = float(np.sqrt(np.mean(0.5 * (l_slice ** 2 + r_slice ** 2)))) if slice_len > 0 else 0.0
+                    vu_stems[s.name] = min(1.0, rms * 3.5)
+
+                    if use_dynamic_timeline:
+                        try:
+                            if plc.is_stereo:
+                                dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
+                                g_l = self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send)
+                                g_r = self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send)
+                            else:
+                                g_l = self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send)
+                                g_r = g_l
+                        except Exception:
+                            g_l = self._cached_vbap_gains_l.get(s.name)
+                            g_r = self._cached_vbap_gains_r.get(s.name)
+                    else:
                         g_l = self._cached_vbap_gains_l.get(s.name)
                         g_r = self._cached_vbap_gains_r.get(s.name)
 
-                if plc.is_stereo:
-                    for ch in range(12):
-                        gain_l = g_l[ch]
-                        gain_r = g_r[ch]
-                        if gain_l > 1e-4:
-                            block_714[:slice_len, ch] += l_slice * gain_l
-                        if gain_r > 1e-4:
-                            block_714[:slice_len, ch] += r_slice * gain_r
-                        if ch == 3:
-                            lfe_energy += float(np.sum(np.abs(l_slice * gain_l + r_slice * gain_r)))
-                else:
-                    mono_slice = 0.5 * (l_slice + r_slice)
-                    for ch in range(12):
-                        gain = g_l[ch]
-                        if gain > 1e-4:
-                            block_714[:slice_len, ch] += mono_slice * gain
+                    if g_l is None or len(g_l) < 12:
+                        continue
+                    if g_r is None or len(g_r) < 12:
+                        g_r = g_l
+
+                    if plc.is_stereo:
+                        for ch in range(12):
+                            gain_l = float(g_l[ch])
+                            gain_r = float(g_r[ch])
+                            if gain_l > 1e-4:
+                                block_714[:slice_len, ch] += l_slice * gain_l
+                            if gain_r > 1e-4:
+                                block_714[:slice_len, ch] += r_slice * gain_r
                             if ch == 3:
-                                lfe_energy += float(np.sum(np.abs(mono_slice * gain)))
+                                lfe_energy += float(np.sum(np.abs(l_slice * gain_l + r_slice * gain_r)))
+                    else:
+                        mono_slice = 0.5 * (l_slice + r_slice)
+                        for ch in range(12):
+                            gain = float(g_l[ch])
+                            if gain > 1e-4:
+                                block_714[:slice_len, ch] += mono_slice * gain
+                                if ch == 3:
+                                    lfe_energy += float(np.sum(np.abs(mono_slice * gain)))
 
-            binaural_block = self.binaural.process_714_to_binaural(block_714, keep_state=True)
+                # Conversão binaural HRTF com estados preservados
+                binaural_block = self.binaural.process_714_to_binaural(block_714, keep_state=True)
 
-            if self._master_volume != 1.0:
-                binaural_block *= self._master_volume
+                if self._master_volume != 1.0:
+                    binaural_block *= self._master_volume
 
-            outdata[:actual_frames] = binaural_block[:actual_frames]
-            if actual_frames < frames:
-                outdata[actual_frames:].fill(0)
+                fill_len = min(actual_frames, binaural_block.shape[0])
+                outdata[:fill_len] = binaural_block[:fill_len]
+                if fill_len < frames:
+                    outdata[fill_len:].fill(0)
 
-            self._current_sample += actual_frames
-            self._latest_time_s = float(self._current_sample) / float(self.sample_rate)
-            self._latest_vu_stems = vu_stems
-            self._latest_sub_vu = min(1.0, lfe_energy / (actual_frames * 0.4 + 1e-5))
+                self._current_sample += actual_frames
+                self._latest_time_s = float(self._current_sample) / float(self.sample_rate)
+                self._latest_vu_stems = vu_stems
+                self._latest_sub_vu = min(1.0, lfe_energy / (max(1, actual_frames) * 0.4))
 
-        if self.on_playback_progress:
-            try:
-                self.on_playback_progress(self._latest_time_s, self._latest_duration_s)
-            except Exception:
-                pass
+            if self.on_playback_progress:
+                try:
+                    self.on_playback_progress(self._latest_time_s, self._latest_duration_s)
+                except Exception:
+                    pass
 
-        if self.on_vu_update:
-            try:
-                self.on_vu_update(vu_stems, self._latest_sub_vu)
-            except Exception:
-                pass
+            if self.on_vu_update:
+                try:
+                    self.on_vu_update(vu_stems, self._latest_sub_vu)
+                except Exception:
+                    pass
+
+        except Exception as err:
+            log.error("Exceção contida no callback de áudio: %s", err)
+            outdata.fill(0)

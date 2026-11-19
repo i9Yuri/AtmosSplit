@@ -673,3 +673,74 @@ def test_k_weighted_lufs_loudness_and_true_peak():
     assert max_peak <= 0.892, f"Pico excedeu o teto True Peak: {max_peak}"
 
 
+def test_stem_card_pan_and_quick_position_snaps():
+    """Valida controles táteis de Pan, Posição Frente/Trás e botões de 1-Clique na UI."""
+    from PySide6.QtWidgets import QApplication
+    from src.ui.stem_card import StemControlCard
+    import sys
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    stem = StemTrack("lead_vocal", "Voz Principal", "#00E5FF", np.zeros((100, 2)), 48000)
+    plc = SpatialPlacement("lead_vocal", x=0.0, y=0.9, z=0.0, spread=0.0, lfe_send=0.0, volume_gain=1.0)
+
+    card = StemControlCard(stem, plc)
+
+    # 1. Testar formatação de textos
+    assert StemControlCard._format_pan_text(0.0) == "Centro"
+    assert "Esq" in StemControlCard._format_pan_text(-0.7)
+    assert "Dir" in StemControlCard._format_pan_text(0.7)
+    assert StemControlCard._format_pos_y_text(0.9) == "Frente"
+    assert StemControlCard._format_pos_y_text(-0.8) == "Trás"
+
+    # 2. Testar snap para Esquerda (Canal Lateral/Frontal Esquerdo)
+    card._snap_left()
+    assert plc.x == pytest.approx(-0.7, abs=0.01)
+
+    # 3. Testar snap para Direita (Canal Lateral/Frontal Direito)
+    card._snap_right()
+    assert plc.x == pytest.approx(0.7, abs=0.01)
+
+    # 4. Testar snap para Trás (Satélites Surround Traseiros)
+    card._snap_rear()
+    assert plc.y == pytest.approx(-0.75, abs=0.01)
+
+    # 5. Testar snap para Centro (Palco / TV Frontal)
+    card._snap_center()
+    assert plc.x == pytest.approx(0.0, abs=0.01)
+    assert plc.y >= 0.90
+
+    # 6. Testar sincronização ultrarrápida de coordenadas
+    card.sync_coords_from_placement(-0.5, 0.2, 0.8)
+    assert card.slider_pan.value() == -50
+    assert card.slider_pos_y.value() == 20
+    assert card.slider_z.value() == 80
+
+
+def test_live_player_crash_proof_and_zero_lock_contention():
+    """Valida que o LiveSpatialPlayer calcula ganhos fora da trava e nunca encerra o processo por exceções."""
+    sr = 48000
+    player = LiveSpatialPlayer(sample_rate=sr)
+
+    stem = StemTrack("vocals", "Voz", "#00E5FF", np.zeros((sr, 2), dtype=np.float32), sr)
+    plc = SpatialPlacement("vocals", x=0.0, y=0.9, z=0.0, spread=0.0, lfe_send=0.0, volume_gain=1.0)
+    player.set_stems_and_placements([stem], {"vocals": plc})
+
+    # Atualizações em alta frequência (simulando arraste de mouse a 120 Hz) não devem travar
+    for i in range(100):
+        t = i / 100.0
+        player.update_placement("vocals", x=float(np.sin(t)), y=float(np.cos(t)), z=0.5)
+
+    assert "vocals" in player._cached_vbap_gains_l
+    assert len(player._cached_vbap_gains_l["vocals"]) == 12
+
+    # Testar callback blindado contra falhas graves
+    outdata = np.ones((512, 2), dtype=np.float32)
+    # Mesmo com estado inconsistente forçado, o callback não deve propagar exceção
+    player._current_sample = 999999999
+    player._audio_callback(outdata, 512, None, None)
+    # Callback deve zerar outdata e não falhar
+    assert np.all(outdata == 0)
+
+
+

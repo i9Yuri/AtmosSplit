@@ -299,7 +299,9 @@ class RoomView714(QWidget):
 
     def _draw_acoustic_energy_rays(self, painter: QPainter, stem_name: str):
         """Raios acústicos VBAP 3D ligando o instrumento ativo aos alto-falantes excitados."""
-        plc = self.placements[stem_name]
+        plc = self.placements.get(stem_name)
+        if not plc:
+            return
 
         if plc.is_stereo:
             dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
@@ -532,7 +534,9 @@ class RoomView714(QWidget):
         )
 
         for name, stem in sorted_stems:
-            plc = self.placements[name]
+            plc = self.placements.get(name)
+            if not plc:
+                continue
             vu_val = self.stems_vu.get(name, 0.0)
             radius = self.get_visual_radius(plc.z, vu_val)
             hit_bound = max(radius + 8.0, 22.0)
@@ -592,34 +596,41 @@ class RoomView714(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        pos = event.position()
+        try:
+            pos = event.position()
 
-        if self._is_dragging and self.active_stem_name:
-            plc = self.placements[self.active_stem_name]
-            y_lift = plc.z * 18.0
-            rx, ry = self._widget_to_room_coords(pos.x(), pos.y() + y_lift)
+            if self._is_dragging and self.active_stem_name and self.active_stem_name in self.placements:
+                plc = self.placements[self.active_stem_name]
+                y_lift = plc.z * 18.0
+                rx, ry = self._widget_to_room_coords(pos.x(), pos.y() + y_lift)
 
-            if plc.is_stereo:
-                # Arraste simétrico espelhado:
-                # O eixo X é mantido positivo (|rx|), e ambos os nós se movem juntos
-                new_x = max(0.10, min(1.0, abs(rx)))
-                plc.x = new_x
-                plc.y = ry
-            else:
-                plc.x = rx
-                plc.y = ry
-
-            self.placement_changed.emit(self.active_stem_name, plc.x, plc.y, plc.z)
-            self.update()
-        else:
-            hovered = self._find_stem_at_pos(pos)
-            if hovered != self.hovered_stem_info:
-                self.hovered_stem_info = hovered
-                if hovered:
-                    self.setCursor(Qt.PointingHandCursor)
+                if plc.is_stereo:
+                    new_x = max(0.10, min(1.0, abs(rx)))
+                    new_y = ry
                 else:
-                    self.setCursor(Qt.ArrowCursor)
-                self.update()
+                    new_x = rx
+                    new_y = ry
+
+                # Throttling inteligente: só propaga se houve deslocamento real (> 0.005)
+                dx = new_x - plc.x
+                dy = new_y - plc.y
+                if (dx * dx + dy * dy) > 0.000025:
+                    plc.x = new_x
+                    plc.y = new_y
+                    self.placement_changed.emit(self.active_stem_name, plc.x, plc.y, plc.z)
+                    self.update()
+            else:
+                hovered = self._find_stem_at_pos(pos)
+                if hovered != self.hovered_stem_info:
+                    self.hovered_stem_info = hovered
+                    if hovered:
+                        self.setCursor(Qt.PointingHandCursor)
+                    else:
+                        self.setCursor(Qt.ArrowCursor)
+                    self.update()
+        except Exception as e:
+            # Blindagem absoluta contra crash de mouse
+            pass
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
@@ -634,25 +645,28 @@ class RoomView714(QWidget):
         Ajusta a ALTURA (Z) do instrumento (e o raio proporcional de visualização).
         Afeta ambos os lados no modo estéreo simultaneamente.
         """
-        pos = event.position()
-        target = self._find_stem_at_pos(pos)
-        target_stem = target[0] if target else self.active_stem_name
+        try:
+            pos = event.position()
+            target = self._find_stem_at_pos(pos)
+            target_stem = target[0] if target else self.active_stem_name
 
-        if target_stem and target_stem in self.placements:
-            if target_stem != self.active_stem_name:
-                self.active_stem_name = target_stem
-                self.stem_selected.emit(target_stem)
+            if target_stem and target_stem in self.placements:
+                if target_stem != self.active_stem_name:
+                    self.active_stem_name = target_stem
+                    self.stem_selected.emit(target_stem)
 
-            delta = event.angleDelta().y()
-            if delta != 0:
-                step = (delta / 120.0) * 0.05
-                plc = self.placements[target_stem]
-                new_z = max(0.0, min(1.0, round(plc.z + step, 3)))
-                plc.z = new_z
+                delta = event.angleDelta().y()
+                if delta != 0:
+                    step = (delta / 120.0) * 0.05
+                    plc = self.placements[target_stem]
+                    new_z = max(0.0, min(1.0, round(plc.z + step, 3)))
+                    plc.z = new_z
 
-                self.placement_changed.emit(target_stem, plc.x, plc.y, plc.z)
-                self.update()
-                event.accept()
-                return
+                    self.placement_changed.emit(target_stem, plc.x, plc.y, plc.z)
+                    self.update()
+                    event.accept()
+                    return
+        except Exception:
+            pass
 
         super().wheelEvent(event)

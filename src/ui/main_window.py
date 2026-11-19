@@ -82,6 +82,19 @@ from .timeline_widget import TimelineWidget
 log = logging.getLogger(__name__)
 
 
+def _install_crash_shield():
+    """Escudo global contra encerramento inesperado por exceções não tratadas no Qt."""
+    def _safe_excepthook(exc_type, exc_val, exc_tb):
+        import traceback
+        tb_str = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
+        log.error("Escudo Global Antigravity interceptou exceção no loop de eventos:\n%s", tb_str)
+
+    sys.excepthook = _safe_excepthook
+
+
+_install_crash_shield()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -559,6 +572,37 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(top_row)
 
+        # Barra Visual de Seleção e Criação de Trechos / Seções da Música
+        self.section_control_bar = QFrame()
+        self.section_control_bar.setStyleSheet("""
+            QFrame {
+                background-color: #171A23;
+                border: 1px solid #282E3E;
+                border-radius: 6px;
+                padding: 4px 6px;
+            }
+        """)
+        sec_layout = QHBoxLayout(self.section_control_bar)
+        sec_layout.setContentsMargins(4, 2, 4, 2)
+        sec_layout.setSpacing(6)
+
+        lbl_sec = QLabel("📍 Trecho:")
+        lbl_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E5FF;")
+        sec_layout.addWidget(lbl_sec)
+
+        self.combo_sections = QComboBox()
+        self.combo_sections.setStyleSheet("font-size: 11px; font-weight: bold; color: #FFFFFF;")
+        self.combo_sections.currentIndexChanged.connect(self._on_combo_section_changed)
+        sec_layout.addWidget(self.combo_sections, stretch=1)
+
+        self.btn_split_here = QPushButton("✂️ Dividir Aqui")
+        self.btn_split_here.setToolTip("Divide a música no ponto atual da agulha para criar uma nova mixagem espacial independente")
+        self.btn_split_here.setStyleSheet("font-size: 10px; font-weight: bold; padding: 4px 8px; background-color: #242A38; border: 1px solid #374158; color: #E2E8F0; border-radius: 4px;")
+        self.btn_split_here.clicked.connect(self._on_split_here_button_clicked)
+        sec_layout.addWidget(self.btn_split_here)
+
+        layout.addWidget(self.section_control_bar)
+
         self.scroll_stems = QScrollArea()
         self.scroll_stems.setWidgetResizable(True)
         self.stems_container = QWidget()
@@ -989,6 +1033,7 @@ class MainWindow(QMainWindow):
         track_duration_s = max(1.0, self.live_player.total_duration_s)
         self.timeline_manager.reset_to_single_section(track_duration_s, self.current_placements)
         self.timeline_widget.refresh_timeline()
+        self._refresh_sections_combo()
 
         self._populate_stems_ui()
         self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
@@ -1031,7 +1076,7 @@ class MainWindow(QMainWindow):
 
     def _on_room_placement_changed(self, stem_name: str, x: float, y: float, z: float):
         if stem_name in self.stem_cards:
-            self.stem_cards[stem_name].sync_from_placement()
+            self.stem_cards[stem_name].sync_coords_from_placement(x, y, z)
         # Salva o posicionamento na seção ativa da timeline
         active_sec = self.timeline_manager.get_active_edit_section()
         if stem_name in active_sec.placements:
@@ -1084,6 +1129,47 @@ class MainWindow(QMainWindow):
         )
 
     # --- Sincronização de Automação por Trechos (Timeline) ---
+    def _refresh_sections_combo(self):
+        """Atualiza a caixa de seleção de trechos para navegação rápida e transparente."""
+        self.combo_sections.blockSignals(True)
+        self.combo_sections.clear()
+        sections = self.timeline_manager.sections
+        active_id = self.timeline_manager.active_edit_section_id
+        active_idx = 0
+        for i, sec in enumerate(sections):
+            label = f"{i+1}. {sec.name} ({sec.start_time_s:.1f}s - {sec.end_time_s:.1f}s)"
+            self.combo_sections.addItem(label, sec.id)
+            if sec.id == active_id:
+                active_idx = i
+        if self.combo_sections.count() > 0:
+            self.combo_sections.setCurrentIndex(active_idx)
+        self.combo_sections.blockSignals(False)
+
+    def _on_combo_section_changed(self, index: int):
+        sec_id = self.combo_sections.currentData()
+        if sec_id and sec_id != self.timeline_manager.active_edit_section_id:
+            self.timeline_manager.active_edit_section_id = sec_id
+            self._on_timeline_section_selected(sec_id)
+            self.timeline_widget.timeline_canvas.update()
+
+    def _on_split_here_button_clicked(self):
+        if not self.current_stems:
+            self.statusBar().showMessage("Carregue uma música antes de dividir em trechos.")
+            return
+        cur_s, tot_s, _, _, _ = self.live_player.get_ui_snapshot()
+        if cur_s <= 0.5 or cur_s >= (tot_s - 0.5):
+            ratio = float(self.slider_time.value()) / 1000.0
+            cur_s = ratio * tot_s
+        new_sec = self.timeline_manager.split_section_at(cur_s)
+        if new_sec:
+            self._refresh_sections_combo()
+            self._on_timeline_section_selected(new_sec.id)
+            self.timeline_widget.timeline_canvas.update()
+            self.statusBar().showMessage(
+                f"✂️ Novo trecho criado aos {cur_s:.1f}s! Ajuste as vozes ou instrumentos para este trecho.",
+                5000
+            )
+
     def _on_timeline_section_selected(self, sec_id: str):
         sec = self.timeline_manager.get_section_by_id(sec_id)
         if not sec:
@@ -1096,20 +1182,32 @@ class MainWindow(QMainWindow):
                 card.sync_from_placement()
 
         self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
+
+        # Sincroniza a caixa suspensa sem disparar eventos circulares
+        self.combo_sections.blockSignals(True)
+        for i in range(self.combo_sections.count()):
+            if self.combo_sections.itemData(i) == sec_id:
+                self.combo_sections.setCurrentIndex(i)
+                break
+        self.combo_sections.blockSignals(False)
+
         self.statusBar().showMessage(
             f"Editando trecho: '{sec.name}' ({sec.start_time_s:.1f}s - {sec.end_time_s:.1f}s) • Ajuste os instrumentos na sala para este momento da faixa"
         )
 
     def _on_timeline_split_requested(self, split_time_s: float):
         sec = self.timeline_manager.get_active_edit_section()
+        self._refresh_sections_combo()
         self._on_timeline_section_selected(sec.id)
         self.statusBar().showMessage(f"Novo trecho criado em {split_time_s:.1f}s! Agora você pode posicionar os instrumentos livremente para este trecho.")
 
     def _on_timeline_renamed(self, sec_id: str, new_name: str):
+        self._refresh_sections_combo()
         self.statusBar().showMessage(f"Trecho renomeado para '{new_name}'.")
 
     def _on_timeline_removed(self, sec_id: str):
         active_sec = self.timeline_manager.get_active_edit_section()
+        self._refresh_sections_combo()
         self._on_timeline_section_selected(active_sec.id)
         self.statusBar().showMessage("Trecho removido e fundido com o vizinho.")
 

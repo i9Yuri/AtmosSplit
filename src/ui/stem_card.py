@@ -127,6 +127,66 @@ class StemControlCard(QFrame):
 
         layout.addLayout(header_layout)
 
+        # Barra de Posicionamento Rápido (1-Clique)
+        row_quick = QHBoxLayout()
+        row_quick.setSpacing(4)
+        
+        lbl_quick = QLabel("Posição:")
+        lbl_quick.setStyleSheet("font-size: 10px; color: #718096; font-weight: bold;")
+        row_quick.addWidget(lbl_quick)
+
+        self.btn_pos_left = QPushButton("⇦ Esq")
+        self.btn_pos_left.setToolTip("Posicionar na Esquerda (Canal Lateral / Frontal Esquerdo)")
+        self.btn_pos_left.clicked.connect(self._snap_left)
+        row_quick.addWidget(self.btn_pos_left)
+
+        self.btn_pos_center = QPushButton("⇧ Centro")
+        self.btn_pos_center.setToolTip("Ancorar no Centro Frontal (Palco / TV)")
+        self.btn_pos_center.clicked.connect(self._snap_center)
+        row_quick.addWidget(self.btn_pos_center)
+
+        self.btn_pos_right = QPushButton("Dir ⇨")
+        self.btn_pos_right.setToolTip("Posicionar na Direita (Canal Lateral / Frontal Direito)")
+        self.btn_pos_right.clicked.connect(self._snap_right)
+        row_quick.addWidget(self.btn_pos_right)
+
+        self.btn_pos_rear = QPushButton("⇩ Fundo")
+        self.btn_pos_rear.setToolTip("Enviar para a Traseira (Satélites Surround)")
+        self.btn_pos_rear.clicked.connect(self._snap_rear)
+        row_quick.addWidget(self.btn_pos_rear)
+
+        layout.addLayout(row_quick)
+
+        # Slider: Pan Estéreo / Lado (Esquerda ⟵ 0 ⟶ Direita)
+        row_pan = QHBoxLayout()
+        lbl_pan = QLabel("Pan (L / R):")
+        self.val_pan = QLabel(self._format_pan_text(self.placement.x))
+        self.val_pan.setFixedWidth(52)
+        self.val_pan.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.slider_pan = QSlider(Qt.Horizontal)
+        self.slider_pan.setRange(-100, 100)
+        self.slider_pan.setValue(int(self.placement.x * 100))
+        self.slider_pan.valueChanged.connect(self._on_pan_change)
+        row_pan.addWidget(lbl_pan)
+        row_pan.addWidget(self.slider_pan, stretch=1)
+        row_pan.addWidget(self.val_pan)
+        layout.addLayout(row_pan)
+
+        # Slider: Posição Frente / Trás (Traseira ⟵ 0 ⟶ Frente/TV)
+        row_pos_y = QHBoxLayout()
+        lbl_pos_y = QLabel("Frente/Trás:")
+        self.val_pos_y = QLabel(self._format_pos_y_text(self.placement.y))
+        self.val_pos_y.setFixedWidth(52)
+        self.val_pos_y.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.slider_pos_y = QSlider(Qt.Horizontal)
+        self.slider_pos_y.setRange(-100, 100)
+        self.slider_pos_y.setValue(int(self.placement.y * 100))
+        self.slider_pos_y.valueChanged.connect(self._on_pos_y_change)
+        row_pos_y.addWidget(lbl_pos_y)
+        row_pos_y.addWidget(self.slider_pos_y, stretch=1)
+        row_pos_y.addWidget(self.val_pos_y)
+        layout.addLayout(row_pos_y)
+
         # Slider: Altura (Teto 7.1.4)
         row_z = QHBoxLayout()
         lbl_z = QLabel("Altura (Teto):")
@@ -207,6 +267,63 @@ class StemControlCard(QFrame):
             self.btn_mute.setStyleSheet("")
         self.changed.emit(self.stem.name)
 
+    @staticmethod
+    def _format_pan_text(x: float) -> str:
+        pct = int(round(x * 100))
+        if abs(pct) < 3:
+            return "Centro"
+        elif pct < 0:
+            return f"{abs(pct)}% Esq"
+        else:
+            return f"{pct}% Dir"
+
+    @staticmethod
+    def _format_pos_y_text(y: float) -> str:
+        pct = int(round(y * 100))
+        if pct > 60:
+            return "Frente"
+        elif pct < -40:
+            return "Trás"
+        else:
+            return "Meio"
+
+    def _snap_left(self):
+        """Posiciona imediatamente no lado esquerdo."""
+        self.placement.x = -0.70
+        self.placement.y = max(-0.20, self.placement.y)
+        self.sync_coords_from_placement(self.placement.x, self.placement.y, self.placement.z)
+        self.changed.emit(self.stem.name)
+
+    def _snap_center(self):
+        """Ancora imediatamente no centro frontal (palco / TV)."""
+        self.placement.x = 0.0
+        self.placement.y = 0.95
+        self.sync_coords_from_placement(self.placement.x, self.placement.y, self.placement.z)
+        self.changed.emit(self.stem.name)
+
+    def _snap_right(self):
+        """Posiciona imediatamente no lado direito."""
+        self.placement.x = 0.70
+        self.placement.y = max(-0.20, self.placement.y)
+        self.sync_coords_from_placement(self.placement.x, self.placement.y, self.placement.z)
+        self.changed.emit(self.stem.name)
+
+    def _snap_rear(self):
+        """Envia imediatamente para o fundo / surround traseiro."""
+        self.placement.y = -0.75
+        self.sync_coords_from_placement(self.placement.x, self.placement.y, self.placement.z)
+        self.changed.emit(self.stem.name)
+
+    def _on_pan_change(self, val: int):
+        self.placement.x = float(val) / 100.0
+        self.val_pan.setText(self._format_pan_text(self.placement.x))
+        self.changed.emit(self.stem.name)
+
+    def _on_pos_y_change(self, val: int):
+        self.placement.y = float(val) / 100.0
+        self.val_pos_y.setText(self._format_pos_y_text(self.placement.y))
+        self.changed.emit(self.stem.name)
+
     def _on_z_change(self, val: int):
         self.placement.z = float(val) / 100.0
         self.val_z.setText(f"{val}%")
@@ -222,24 +339,40 @@ class StemControlCard(QFrame):
         self.val_vol.setText(f"{val}%")
         self.changed.emit(self.stem.name)
 
-    def sync_from_placement(self):
-        """Atualiza os sliders e botões para refletir alterações vindas do mouse/sala/timeline."""
+    def sync_coords_from_placement(self, x: float, y: float, z: float):
+        """Atualização rápida de coordenadas (chamada durante arraste no mouse sem redesenhar tudo)."""
+        self.slider_pan.blockSignals(True)
+        self.slider_pos_y.blockSignals(True)
         self.slider_z.blockSignals(True)
+
+        self.slider_pan.setValue(int(x * 100))
+        self.slider_pos_y.setValue(int(y * 100))
+        self.slider_z.setValue(int(z * 100))
+
+        self.val_pan.setText(self._format_pan_text(x))
+        self.val_pos_y.setText(self._format_pos_y_text(y))
+        self.val_z.setText(f"{int(z * 100)}%")
+
+        self.slider_pan.blockSignals(False)
+        self.slider_pos_y.blockSignals(False)
+        self.slider_z.blockSignals(False)
+
+    def sync_from_placement(self):
+        """Atualiza todos os sliders e botões para refletir alterações completas."""
+        self.sync_coords_from_placement(self.placement.x, self.placement.y, self.placement.z)
+
         self.slider_lfe.blockSignals(True)
         self.slider_vol.blockSignals(True)
         self.btn_stereo.blockSignals(True)
         self.btn_solo.blockSignals(True)
         self.btn_mute.blockSignals(True)
 
-        z_pct = int(self.placement.z * 100)
         lfe_pct = int(self.placement.lfe_send * 100)
         vol_pct = int(self.placement.volume_gain * 100)
 
-        self.slider_z.setValue(z_pct)
         self.slider_lfe.setValue(lfe_pct)
         self.slider_vol.setValue(vol_pct)
 
-        self.val_z.setText(f"{z_pct}%")
         self.val_lfe.setText(f"{lfe_pct}%")
         self.val_vol.setText(f"{vol_pct}%")
 
@@ -258,7 +391,6 @@ class StemControlCard(QFrame):
         else:
             self.btn_mute.setStyleSheet("")
 
-        self.slider_z.blockSignals(False)
         self.slider_lfe.blockSignals(False)
         self.slider_vol.blockSignals(False)
         self.btn_stereo.blockSignals(False)
