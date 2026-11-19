@@ -59,6 +59,10 @@ class RoomView714(QWidget):
         self._is_dragging: bool = False
         self._drag_puck_side: str = "C"  # "L", "R", ou "C"
 
+        # Cache de ganhos acústicos para desenho instantâneo de raios (Zero VBAP no paintEvent)
+        self._cached_rays_l: Optional[np.ndarray] = None
+        self._cached_rays_r: Optional[np.ndarray] = None
+
         # VU Meters reativos em tempo real
         self.stems_vu: Dict[str, float] = {}
         self.sub_vu: float = 0.0
@@ -73,19 +77,49 @@ class RoomView714(QWidget):
         self.color_ceiling_ring = QColor(255, 255, 255, 28)
         self.color_text_sec = QColor("#718096")
 
+    def _update_rays_cache(self):
+        """Atualiza os vetores de ganhos pré-calculados para o feixe acústico visual do instrumento ativo."""
+        if not self.active_stem_name:
+            self._cached_rays_l = None
+            self._cached_rays_r = None
+            return
+
+        plc = self.placements.get(self.active_stem_name)
+        if not plc:
+            self._cached_rays_l = None
+            self._cached_rays_r = None
+            return
+
+        try:
+            if plc.is_stereo:
+                dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
+                self._cached_rays_l = np.asarray(self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                self._cached_rays_r = np.asarray(self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+            else:
+                gl = np.asarray(self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                self._cached_rays_l = gl
+                self._cached_rays_r = gl
+        except Exception:
+            self._cached_rays_l = None
+            self._cached_rays_r = None
+
     def set_stems_and_placements(self, stems: List[StemTrack], placements: Dict[str, SpatialPlacement]):
         """Atualiza a lista de instrumentos e seus posicionamentos espaciais."""
         self.stems = {s.name: s for s in stems}
         self.placements = placements
         if stems and (self.active_stem_name not in self.stems):
             self.active_stem_name = stems[0].name
+        self._update_rays_cache()
         self.update()
 
     def set_active_stem(self, stem_name: str):
-        """Seleciona o instrumento ativo."""
+        """Seleciona o instrumento ativo de forma idempotente."""
         if stem_name in self.stems:
+            changed = (self.active_stem_name != stem_name)
             self.active_stem_name = stem_name
-            self.stem_selected.emit(stem_name)
+            self._update_rays_cache()
+            if changed:
+                self.stem_selected.emit(stem_name)
             self.update()
 
     def update_placement(self, stem_name: str, x: float, y: float, z: float, is_stereo: Optional[bool] = None):
@@ -97,6 +131,8 @@ class RoomView714(QWidget):
             plc.z = z
             if is_stereo is not None:
                 plc.is_stereo = is_stereo
+            if self.active_stem_name == stem_name:
+                self._update_rays_cache()
             self.update()
 
     def toggle_stereo_mirror(self, stem_name: str):
@@ -298,15 +334,16 @@ class RoomView714(QWidget):
         painter.drawText(QRectF(center.x() - 30, center.y() + 11, 60, 16), Qt.AlignCenter, "OUVINTE")
 
     def _draw_acoustic_energy_rays(self, painter: QPainter, stem_name: str):
-        """Raios acústicos VBAP 3D ligando o instrumento ativo aos alto-falantes excitados."""
+        """Raios acústicos VBAP 3D ligando o instrumento ativo aos alto-falantes excitados (Zero cálculo no paintEvent)."""
         plc = self.placements.get(stem_name)
-        if not plc:
+        if not plc or self._cached_rays_l is None:
             return
+
+        gains_l = self._cached_rays_l
+        gains_r = self._cached_rays_r if self._cached_rays_r is not None else gains_l
 
         if plc.is_stereo:
             dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-            gains_l = self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send)
-            gains_r = self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send)
             _, sphere_pt_l = self._get_node_positions(-dist_x, plc.y, plc.z)
             _, sphere_pt_r = self._get_node_positions(dist_x, plc.y, plc.z)
 
@@ -330,11 +367,10 @@ class RoomView714(QWidget):
                     painter.setPen(QPen(color, max(1.0, gr * 3.0), Qt.SolidLine))
                     painter.drawLine(sphere_pt_r, spk_pt)
         else:
-            gains = self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send)
             _, sphere_pt = self._get_node_positions(plc.x, plc.y, plc.z)
 
             for spk in SPEAKER_COORDINATES_714:
-                gain = gains[spk.channel_index]
+                gain = gains_l[spk.channel_index]
                 if gain > 0.08:
                     spk_pt = self._room_to_widget_coords(spk.x, spk.y)
                     alpha = int(min(255, gain * 240))
@@ -571,11 +607,14 @@ class RoomView714(QWidget):
 
             if target:
                 stem_name, side = target
+                changed = (self.active_stem_name != stem_name)
                 self.active_stem_name = stem_name
                 self._is_dragging = True
                 self._drag_puck_side = side
                 self.setCursor(Qt.ClosedHandCursor)
-                self.stem_selected.emit(stem_name)
+                self._update_rays_cache()
+                if changed:
+                    self.stem_selected.emit(stem_name)
                 self.update()
         elif event.button() == Qt.RightButton:
             pos = event.position()

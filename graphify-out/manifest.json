@@ -144,9 +144,9 @@
     "semantic_hash": ""
   },
   "src/spatial/live_player.py": {
-    "mtime": 1795108474.1827424,
-    "seen": 1795109086.8185935,
-    "ast_hash": "5f2bf22e2b0e7c01a577edc56d0d349d",
+    "mtime": 1795110038.05595,
+    "seen": 1795110523.4911785,
+    "ast_hash": "332558dc4d3cf13927fba653b120d3d8",
     "semantic_hash": ""
   },
   "src/spatial/master_renderer.py": {
@@ -156,9 +156,9 @@
     "semantic_hash": ""
   },
   "src/spatial/timeline_manager.py": {
-    "mtime": 1795095165.011958,
-    "seen": 1795095267.894392,
-    "ast_hash": "68b638483d4a8f3784c83be4dcfd7bf8",
+    "mtime": 1795110252.0524218,
+    "seen": 1795110523.4911861,
+    "ast_hash": "9c0ea6ebde5ea542a6e0a1aef1028563",
     "semantic_hash": ""
   },
   "src/spatial/vbap_engine.py": {
@@ -174,21 +174,21 @@
     "semantic_hash": ""
   },
   "src/ui/main_window.py": {
-    "mtime": 1795108962.1234367,
-    "seen": 1795109086.8186085,
-    "ast_hash": "03790b57c29d0b8d20faa94c060ab88e",
+    "mtime": 1795110317.4921706,
+    "seen": 1795110523.4911957,
+    "ast_hash": "3603234383a6da4da6b7fd5a09162400",
     "semantic_hash": ""
   },
   "src/ui/room_view_714.py": {
-    "mtime": 1795108926.0860605,
-    "seen": 1795109086.8186126,
-    "ast_hash": "546426b91635df393349215e207b2a66",
+    "mtime": 1795110122.1049182,
+    "seen": 1795110523.4911995,
+    "ast_hash": "aca9876d18d538b4bcb81f2d28cff40d",
     "semantic_hash": ""
   },
   "src/ui/stem_card.py": {
-    "mtime": 1795108916.0919557,
-    "seen": 1795109086.8186162,
-    "ast_hash": "fb89c294ebcf3550e157f6964d7e5a3a",
+    "mtime": 1795110169.0394614,
+    "seen": 1795110523.4912033,
+    "ast_hash": "7db65b11e1da0e7d02629f4c4d6d83a8",
     "semantic_hash": ""
   },
   "src/ui/timeline_widget.py": {
@@ -204,15 +204,15 @@
     "semantic_hash": ""
   },
   "tests/test_atmossplit.py": {
-    "mtime": 1795109013.5259693,
-    "seen": 1795109086.8186252,
-    "ast_hash": "d087c5d306ca4b95a400ebf2cc5c500c",
+    "mtime": 1795110398.0650368,
+    "seen": 1795110523.4912128,
+    "ast_hash": "d0d162c210faac1125aebe1a7e1a02ab",
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1795109080.586674,
-    "seen": 1795109086.818629,
-    "ast_hash": "ff4eaa7e556424c12d344b4f7ba608b5",
+    "mtime": 1795110509.5472353,
+    "seen": 1795110523.4912167,
+    "ast_hash": "1219bc84022d396fe89f17377ee3dfed",
     "semantic_hash": ""
   },
   "ENVIRONMENT_REPORT.md": {
@@ -222,9 +222,9 @@
     "semantic_hash": ""
   },
   "PROJECT_CONTEXT.md": {
-    "mtime": 1795109064.0475,
-    "seen": 1795109086.8186347,
-    "ast_hash": "c91da56f47103e7da345551e93c9724e",
+    "mtime": 1795110498.5641172,
+    "seen": 1795110523.4912229,
+    "ast_hash": "71573828b0ecbfb898e8c203c977cb50",
     "semantic_hash": ""
   },
   "README.md": {

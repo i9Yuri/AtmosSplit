@@ -1032,6 +1032,7 @@ class MainWindow(QMainWindow):
         self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
         track_duration_s = max(1.0, self.live_player.total_duration_s)
         self.timeline_manager.reset_to_single_section(track_duration_s, self.current_placements)
+        self.live_player.set_timeline_manager(self.timeline_manager)
         self.timeline_widget.refresh_timeline()
         self._refresh_sections_combo()
 
@@ -1100,16 +1101,15 @@ class MainWindow(QMainWindow):
 
     def _on_room_stem_selected(self, stem_name: str):
         for name, card in self.stem_cards.items():
-            if name == stem_name:
-                card.setStyleSheet("QFrame#StemControlCard { border: 2px solid #00E5FF; background-color: #1A1F2C; }")
+            is_active = (name == stem_name)
+            card.set_selected(is_active)
+            if is_active:
                 self.scroll_stems.ensureWidgetVisible(card)
                 z_pct = int(round(card.placement.z * 100))
                 self.statusBar().showMessage(
                     f"Instrumento: {card.stem.display_name} (Altura Z: {z_pct}%) • "
                     f"Scroll = Altura Z • Tecla 'D' = Espelhar Estéreo (L/R) • Tecla '0' = Centralizar"
                 )
-            else:
-                card.setStyleSheet("")
 
     def _on_stem_card_changed(self, stem_name: str):
         plc = self.current_placements[stem_name]
@@ -1150,7 +1150,7 @@ class MainWindow(QMainWindow):
         if sec_id and sec_id != self.timeline_manager.active_edit_section_id:
             self.timeline_manager.active_edit_section_id = sec_id
             self._on_timeline_section_selected(sec_id)
-            self.timeline_widget.timeline_canvas.update()
+            self.timeline_widget.refresh_timeline()
 
     def _on_split_here_button_clicked(self):
         if not self.current_stems:
@@ -1164,7 +1164,7 @@ class MainWindow(QMainWindow):
         if new_sec:
             self._refresh_sections_combo()
             self._on_timeline_section_selected(new_sec.id)
-            self.timeline_widget.timeline_canvas.update()
+            self.timeline_widget.refresh_timeline()
             self.statusBar().showMessage(
                 f"✂️ Novo trecho criado aos {cur_s:.1f}s! Ajuste as vozes ou instrumentos para este trecho.",
                 5000

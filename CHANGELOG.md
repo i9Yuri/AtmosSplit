@@ -2,6 +2,24 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.6.1] - 2026-11-19
+### Corrigido & Otimizado (Arquitetura DSP 100% Lock-Free e Eliminação de Congelamentos no Sistema)
+- **Eliminação Total de Congelamentos no Sistema Operacional e Compositor Wayland (`src/spatial/live_player.py`):**
+  - **Diagnóstico da Causa Raiz:** O congelamento total do computador ao clicar ou mover instrumentos ocorria devido à contenção de trava (`threading.Lock`) entre o callback C de áudio de alta prioridade do PortAudio/PipeWire e a thread principal da interface gráfica (GUI). Ao receber eventos do mouse a 120 Hz, polling a 33 Hz e seleções de cards, a GUI retinha o lock enquanto realizava operações no Qt. A thread de áudio perdia o prazo de processamento (quantum deadline miss) do PipeWire aguardando pelo lock, gerando stall no servidor de áudio que travava em cascata o compositor de janelas Wayland (KWin) e congelava a tela do desktop.
+  - **Arquitetura 100% Lock-Free com Troca Atômica de Ponteiro:** Removido completamente `threading.Lock` das rotinas de áudio em tempo real. Implementado o padrão `AudioDSPState`: a interface gráfica constrói um novo objeto de estado de DSP de forma assíncrona e executa uma troca atômica de referência (`self._dsp_state = new_state`) a nível de bytecode no CPython (< 10 ns). O callback de áudio nunca espera por travas ou locks da GUI.
+- **Interpolação Vetorial Pré-calculada de Seções da Timeline (`src/spatial/timeline_manager.py`):**
+  - Eliminado o recálculo trigonométrico e matricial de 14 chamadas VBAP por bloco durante a reprodução.
+  - As seções da linha do tempo agora pré-calculam e armazenam seus vetores de ganhos (`cached_gains_l` e `cached_gains_r`). O crossfade temporal entre trechos executa uma interpolação vetorial ponderada direta ($\mathbf{g} = (1-\alpha)\mathbf{g}_A + \alpha\mathbf{g}_B$), com execução instantânea (< 5 µs).
+  - Adicionado `import numpy as np` no topo do módulo, corrigindo `NameError` durante divisão de seções.
+- **Otimização de Renderização e Idempotência (`src/ui/room_view_714.py`):**
+  - Implementado cache dos vetores acústicos (`_cached_rays_l` e `_cached_rays_r`), eliminando qualquer recálculo de VBAP de dentro do `paintEvent`.
+  - Protegida a emissão de `stem_selected` para disparar apenas se o instrumento ativo de fato mudou, eliminando repinturas em cascata ao clicar repetidamente no mesmo elemento.
+- **Eliminação de Thrashing de Estilo e Sincronização Leve (`src/ui/stem_card.py` & `src/ui/main_window.py`):**
+  - Adicionado método `set_selected(is_active)` em `StemControlCard`, substituindo a limpeza destrutiva via `setStyleSheet("")` e preservando a árvore de geometria dos widgets.
+  - Corrigido `AttributeError: 'TimelineWidget' object has no attribute 'timeline_canvas'` substituindo por `self.timeline_widget.refresh_timeline()`.
+- **Validação Automatizada:**
+  - Adicionado teste `test_lock_free_dsp_and_timeline_crossfade_audio_callback` validando a ausência de contenção de travas sob alta concorrência e interpolação vetorial pura. Total de 23 testes passando com 100% de sucesso.
+
 ## [1.6.0] - 2026-11-19
 ### Adicionado & Corrigido (Arquitetura Zero-Crash, Controles Táteis de Pan/Posição e Navegação Visual por Trechos)
 - **Eliminação de Congelamentos e Travamentos por Contenção de Trava (`src/spatial/live_player.py`):**

@@ -236,6 +236,30 @@ class StemControlCard(QFrame):
         self.selected.emit(self.stem.name)
         super().mousePressEvent(event)
 
+    def set_selected(self, is_selected: bool):
+        """Altera a borda e realce do card de forma leve e instantânea sem destruir o layout interno."""
+        if getattr(self, "_is_selected_state", False) == is_selected:
+            return
+        self._is_selected_state = is_selected
+        if is_selected:
+            self.setStyleSheet("""
+                QFrame#StemControlCard {
+                    background-color: #1A1F2C;
+                    border: 2px solid #00E5FF;
+                    border-radius: 8px;
+                    padding: 6px;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame#StemControlCard {
+                    background-color: #16181D;
+                    border: 1px solid #262A34;
+                    border-radius: 8px;
+                    padding: 6px;
+                }
+            """)
+
     def _update_stereo_button_style(self):
         if self.placement.is_stereo:
             self.btn_stereo.setStyleSheet("background-color: #00E5FF; color: #000000; border: 1px solid #00B4D8; font-weight: bold;")
@@ -341,6 +365,10 @@ class StemControlCard(QFrame):
 
     def sync_coords_from_placement(self, x: float, y: float, z: float):
         """Atualização rápida de coordenadas (chamada durante arraste no mouse sem redesenhar tudo)."""
+        self.placement.x = x
+        self.placement.y = y
+        self.placement.z = z
+
         self.slider_pan.blockSignals(True)
         self.slider_pos_y.blockSignals(True)
         self.slider_z.blockSignals(True)

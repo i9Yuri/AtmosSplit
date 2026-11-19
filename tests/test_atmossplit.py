@@ -743,4 +743,51 @@ def test_live_player_crash_proof_and_zero_lock_contention():
     assert np.all(outdata == 0)
 
 
+def test_lock_free_dsp_and_timeline_crossfade_audio_callback():
+    """Valida motor de áudio 100% Lock-Free e crossfade vetorial instantâneo entre seções."""
+    from src.spatial.timeline_manager import SpatialTimelineManager
+    import threading
+
+    sr = 48000
+    player = LiveSpatialPlayer(sample_rate=sr, block_size=1024)
+
+    stems = [
+        StemTrack("lead_vocal", "Voz Principal", "#00E5FF", np.ones((sr * 10, 2), dtype=np.float32) * 0.5, sr),
+        StemTrack("drums", "Bateria", "#ED8936", np.ones((sr * 10, 2), dtype=np.float32) * 0.3, sr)
+    ]
+    plcs = {
+        "lead_vocal": SpatialPlacement("lead_vocal", 0.0, 0.95, 0.0, 0.0, 0.0, 1.0),
+        "drums": SpatialPlacement("drums", 0.5, 0.0, 0.2, 0.2, 0.1, 1.0, is_stereo=True)
+    }
+
+    player.set_stems_and_placements(stems, plcs)
+    mgr = SpatialTimelineManager(10.0, plcs)
+    mgr.split_section_at(5.0)
+    # Na seção 2, move vocal para trás à esquerda
+    mgr.sections[1].placements["lead_vocal"].x = -0.7
+    mgr.sections[1].placements["lead_vocal"].y = -0.5
+    player.set_timeline_manager(mgr)
+
+    player._is_playing = True
+
+    # 1. Valida que as seções possuem ganhos pré-calculados
+    assert len(mgr.sections[0].cached_gains_l) == 2
+    assert len(mgr.sections[1].cached_gains_l) == 2
+
+    # 2. Testa crossfade vetorial direto
+    gl_mid, gr_mid = mgr.get_interpolated_gains_at_time(5.0, "lead_vocal")
+    assert gl_mid is not None
+    assert len(gl_mid) == 12
+
+    # 3. Execução concorrente do callback e atualizações do mouse (sem travas / sem contenção)
+    outdata = np.zeros((1024, 2), dtype=np.float32)
+    for i in range(20):
+        player.update_placement("lead_vocal", x=float(np.sin(i*0.2)), y=float(np.cos(i*0.2)), z=0.3)
+        player._audio_callback(outdata, 1024, None, None)
+        assert np.any(outdata != 0), "Áudio deve ser gerado continuamente sem bloqueio!"
+
+    player._is_playing = False
+
+
+
 

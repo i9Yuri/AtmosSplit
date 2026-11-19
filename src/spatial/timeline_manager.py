@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from .auto_director import SpatialPlacement
 
 
@@ -24,6 +26,8 @@ class SpatialSection:
     end_time_s: float                   # Fim do trecho em segundos
     placements: Dict[str, SpatialPlacement]  # Cópia independente do posicionamento 3D dos stems
     color_hex: str = "#00E5FF"          # Cor temática do bloco visual
+    cached_gains_l: Dict[str, np.ndarray] = field(default_factory=dict)
+    cached_gains_r: Dict[str, np.ndarray] = field(default_factory=dict)
 
 
 class SpatialTimelineManager:
@@ -123,7 +127,9 @@ class SpatialTimelineManager:
             start_time_s=round(t, 2),
             end_time_s=orig_end,
             placements=copy.deepcopy(orig_sec.placements),
-            color_hex=self._next_color()
+            color_hex=self._next_color(),
+            cached_gains_l={k: np.copy(v) for k, v in orig_sec.cached_gains_l.items()},
+            cached_gains_r={k: np.copy(v) for k, v in orig_sec.cached_gains_r.items()}
         )
 
         self.sections.insert(target_idx + 1, new_sec)
@@ -177,6 +183,74 @@ class SpatialTimelineManager:
             if sec.start_time_s <= t <= sec.end_time_s:
                 return sec
         return self.sections[-1]
+
+    def recalculate_section_gains(self, vbap_engine):
+        """Pré-calcula os vetores de 12 ganhos VBAP de todas as seções (Zero custo no callback de áudio)."""
+        import numpy as np
+        for sec in self.sections:
+            sec.cached_gains_l.clear()
+            sec.cached_gains_r.clear()
+            for stem_name, plc in sec.placements.items():
+                if plc.is_stereo:
+                    dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
+                    gl = np.asarray(vbap_engine.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                    gr = np.asarray(vbap_engine.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                else:
+                    gl = np.asarray(vbap_engine.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
+                    gr = gl
+                sec.cached_gains_l[stem_name] = gl
+                sec.cached_gains_r[stem_name] = gr
+
+    def get_interpolated_gains_at_time(
+        self,
+        time_s: float,
+        stem_name: str,
+        crossfade_window_s: float = 1.0
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Retorna os vetores de ganhos (L e R) interpolados suavemente por crossfade vetorial direto.
+        Zero cálculo trigonométrico em tempo real: pura soma e multiplicação de vetores (12 floats).
+        """
+        if not self.sections:
+            return None, None
+
+        if len(self.sections) == 1:
+            sec = self.sections[0]
+            return sec.cached_gains_l.get(stem_name), sec.cached_gains_r.get(stem_name)
+
+        t = max(0.0, min(self.total_duration_s, float(time_s)))
+        half_w = max(0.05, crossfade_window_s / 2.0)
+
+        for idx in range(len(self.sections) - 1):
+            sec_a = self.sections[idx]
+            sec_b = self.sections[idx + 1]
+            boundary = sec_b.start_time_s
+
+            if (boundary - half_w) <= t <= (boundary + half_w):
+                raw_alpha = (t - (boundary - half_w)) / (2.0 * half_w)
+                raw_alpha = max(0.0, min(1.0, raw_alpha))
+                alpha = raw_alpha * raw_alpha * (3.0 - 2.0 * raw_alpha)
+                inv_alpha = 1.0 - alpha
+
+                gl_a = sec_a.cached_gains_l.get(stem_name)
+                gl_b = sec_b.cached_gains_l.get(stem_name)
+                gr_a = sec_a.cached_gains_r.get(stem_name)
+                gr_b = sec_b.cached_gains_r.get(stem_name)
+
+                if gl_a is not None and gl_b is not None:
+                    interp_gl = inv_alpha * gl_a + alpha * gl_b
+                else:
+                    interp_gl = gl_a if gl_a is not None else gl_b
+
+                if gr_a is not None and gr_b is not None:
+                    interp_gr = inv_alpha * gr_a + alpha * gr_b
+                else:
+                    interp_gr = gr_a if gr_a is not None else gr_b
+
+                return interp_gl, interp_gr
+
+        active_sec = self.get_section_at_time(t)
+        return active_sec.cached_gains_l.get(stem_name), active_sec.cached_gains_r.get(stem_name)
 
     def get_interpolated_placements(
         self,
