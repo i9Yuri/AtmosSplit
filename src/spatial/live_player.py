@@ -52,6 +52,7 @@ class AudioDSPState:
     any_solo: bool = False
     max_samples: int = 0
     master_volume: float = 1.0
+    stem_sources: Dict[str, str] = field(default_factory=dict)
 
 
 class LiveSpatialPlayer:
@@ -199,6 +200,7 @@ class LiveSpatialPlayer:
         is_solo = {name: value for name, value in is_solo.items() if name in active_names}
         gains_l = {name: value for name, value in gains_l.items() if name in active_names}
         gains_r = {name: value for name, value in gains_r.items() if name in active_names}
+        stem_sources = {name: plc.source_stem_name or name for name, plc in placements.items() if name in active_names}
         self._cached_vbap_gains_l = gains_l
         self._cached_vbap_gains_r = gains_r
         self._dsp_state = AudioDSPState(
@@ -213,7 +215,8 @@ class LiveSpatialPlayer:
             is_solo=is_solo,
             any_solo=any(is_solo.values()),
             max_samples=dsp.max_samples,
-            master_volume=dsp.master_volume
+            master_volume=dsp.master_volume,
+            stem_sources=stem_sources
         )
 
     def _recompute_gains_for_stem(self, name: str):
@@ -269,6 +272,7 @@ class LiveSpatialPlayer:
 
             self._cached_vbap_gains_l = gains_l
             self._cached_vbap_gains_r = gains_r
+            stem_sources = {name: plc.source_stem_name or name for name, plc in placements.items()}
             if self.timeline_manager is not None:
                 self.timeline_manager.recalculate_section_gains(self.vbap)
             self._dsp_state = AudioDSPState(
@@ -283,7 +287,8 @@ class LiveSpatialPlayer:
                 is_solo=is_solo,
                 any_solo=any(is_solo.values()),
                 max_samples=self._max_samples,
-                master_volume=self._master_volume
+                master_volume=self._master_volume,
+                stem_sources=stem_sources
             )
             return
 
@@ -345,6 +350,8 @@ class LiveSpatialPlayer:
         if self.timeline_manager is not None:
             self.timeline_manager.recalculate_section_gains(self.vbap)
 
+        stem_sources = {name: plc.source_stem_name or name for name, plc in placements.items()}
+
         # Publica o estado inicial atômico 100% pronto para o callback de áudio
         self._dsp_state = AudioDSPState(
             stems=list(stems),
@@ -358,7 +365,8 @@ class LiveSpatialPlayer:
             is_solo=is_solo,
             any_solo=any_solo,
             max_samples=max_samples,
-            master_volume=self._master_volume
+            master_volume=self._master_volume,
+            stem_sources=stem_sources
         )
 
     def update_placement(self, stem_name: str, x: float, y: float, z: float, spread: Optional[float] = None, lfe: Optional[float] = None, is_stereo: Optional[bool] = None):
@@ -417,6 +425,9 @@ class LiveSpatialPlayer:
         new_is_solo[stem_name] = bool(plc.is_solo)
         any_solo = any(new_is_solo.values())
 
+        new_stem_sources = dict(dsp.stem_sources)
+        new_stem_sources[stem_name] = plc.source_stem_name or stem_name
+
         self._dsp_state = AudioDSPState(
             stems=dsp.stems,
             cached_ch_l=dsp.cached_ch_l,
@@ -429,7 +440,8 @@ class LiveSpatialPlayer:
             is_solo=new_is_solo,
             any_solo=any_solo,
             max_samples=dsp.max_samples,
-            master_volume=dsp.master_volume
+            master_volume=dsp.master_volume,
+            stem_sources=new_stem_sources
         )
 
     def set_volume(self, vol: float):
@@ -448,7 +460,8 @@ class LiveSpatialPlayer:
             is_solo=dsp.is_solo,
             any_solo=dsp.any_solo,
             max_samples=dsp.max_samples,
-            master_volume=self._master_volume
+            master_volume=self._master_volume,
+            stem_sources=dsp.stem_sources
         )
 
     def play(self):
@@ -608,9 +621,9 @@ class LiveSpatialPlayer:
             has_dynamic_timeline = (tm is not None and len(tm.sections) > 1)
 
             any_solo = dsp.any_solo
+            sources_map = dsp.stem_sources if dsp.stem_sources else {s.name: s.name for s in dsp.stems}
 
-            for name, plc in self.placements.items():
-                source_name = plc.source_stem_name or name
+            for name, source_name in sources_map.items():
                 if any_solo and not dsp.is_solo.get(name, False):
                     continue
                 if dsp.is_muted.get(name, False):
@@ -626,7 +639,7 @@ class LiveSpatialPlayer:
                 if slice_len <= 0 or slice_len > block_714.shape[0]:
                     continue
 
-                gain_vol = dsp.vol_gains.get(name, plc.volume_gain)
+                gain_vol = dsp.vol_gains.get(name, 1.0)
                 l_slice = ch_l_full[start_idx:start_idx + slice_len] * gain_vol
                 r_slice = ch_r_full[start_idx:start_idx + slice_len] * gain_vol
 
@@ -634,15 +647,20 @@ class LiveSpatialPlayer:
                 vu_stems[name] = min(1.0, rms * 3.5)
 
                 if has_dynamic_timeline:
-                    g_l, g_r = tm.get_interpolated_gains_at_time(cur_time_s, name)
+                    try:
+                        g_l, g_r = tm.get_interpolated_gains_at_time(cur_time_s, name)
+                    except Exception:
+                        g_l, g_r = None, None
                 else:
                     g_l = dsp.cached_vbap_gains_l.get(name)
                     g_r = dsp.cached_vbap_gains_r.get(name)
 
                 if g_l is None or len(g_l) < 12:
+                    g_l = dsp.cached_vbap_gains_l.get(name)
+                if g_l is None or len(g_l) < 12:
                     continue
                 if g_r is None or len(g_r) < 12:
-                    g_r = g_l
+                    g_r = dsp.cached_vbap_gains_r.get(name) or g_l
 
                 is_stereo = dsp.is_stereo.get(name, False)
                 if is_stereo:

@@ -25,9 +25,10 @@ from PySide6.QtGui import (
     QPainterPath,
     QMouseEvent,
     QWheelEvent,
+    QKeyEvent,
     QCursor,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QMenu
 
 from ..spatial.vbap_engine import SPEAKER_COORDINATES_714, SpeakerPosition714, VBAP714Engine
 from ..spatial.auto_director import SpatialPlacement
@@ -43,6 +44,12 @@ class RoomView714(QWidget):
     placement_changed = Signal(str, float, float, float)
     stereo_toggled = Signal(str, bool)
     stem_selected = Signal(str)
+    duplicate_requested = Signal(str)
+    delete_requested = Signal(str)
+    copy_requested = Signal(str)
+    paste_requested = Signal()
+    playback_toggle_requested = Signal()
+    seek_requested = Signal(float)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -613,7 +620,147 @@ class RoomView714(QWidget):
             target = self._find_stem_at_pos(pos)
             if target:
                 stem_name, _ = target
-                self.toggle_stereo_mirror(stem_name)
+                if self.active_stem_name != stem_name:
+                    self.active_stem_name = stem_name
+                    self._update_rays_cache()
+                    self.stem_selected.emit(stem_name)
+                    self.update()
+
+    def contextMenuEvent(self, event):
+        pos = event.pos()
+        target = self._find_stem_at_pos(QPointF(pos))
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1A1D24;
+                color: #E2E8F0;
+                border: 1px solid #2E3444;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+                font-size: 11px;
+            }
+            QMenu::item:selected {
+                background-color: #00E5FF;
+                color: #000000;
+                font-weight: bold;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #2E3444;
+                margin: 4px 8px;
+            }
+        """)
+
+        target_name = target[0] if target else self.active_stem_name
+
+        if target_name and target_name in self.placements:
+            plc = self.placements[target_name]
+            disp_name = target_name
+            if target_name in self.stems:
+                disp_name = self.stems[target_name].display_name
+
+            act_title = menu.addAction(f"📍 {disp_name}")
+            act_title.setEnabled(False)
+            menu.addSeparator()
+
+            act_stereo = menu.addAction("🪞 Espelhamento Estéreo (L / R)  [D]")
+            act_stereo.setCheckable(True)
+            act_stereo.setChecked(plc.is_stereo)
+            act_stereo.triggered.connect(lambda: self.toggle_stereo_mirror(target_name))
+
+            menu.addSeparator()
+
+            act_copy = menu.addAction("📋 Copiar Elemento  [Ctrl+C]")
+            act_copy.triggered.connect(lambda: self.copy_requested.emit(target_name))
+
+            act_dup = menu.addAction("➕ Duplicar / Nova Fonte 3D  [Ctrl+V]")
+            act_dup.triggered.connect(lambda: self.duplicate_requested.emit(target_name))
+
+            if plc.source_stem_name not in (None, target_name) or "::" in target_name:
+                act_del = menu.addAction("🗑️ Excluir Instância  [Del]")
+                act_del.triggered.connect(lambda: self.delete_requested.emit(target_name))
+
+            menu.addSeparator()
+
+            act_center = menu.addAction("🎯 Centralizar (0, 0, 0)  [0]")
+            act_center.triggered.connect(lambda: self._reset_placement_pos(target_name))
+
+            act_up = menu.addAction("▲ Subir Altura Z (+10%)  [↑]")
+            act_up.triggered.connect(lambda: self._adjust_placement_z(target_name, 0.10))
+
+            act_down = menu.addAction("▼ Baixar Altura Z (-10%)  [↓]")
+            act_down.triggered.connect(lambda: self._adjust_placement_z(target_name, -0.10))
+        else:
+            act_paste = menu.addAction("➕ Colar Elemento Copiado  [Ctrl+V]")
+            act_paste.triggered.connect(self.paste_requested.emit)
+
+        menu.exec(event.globalPos())
+
+    def _reset_placement_pos(self, stem_name: str):
+        if stem_name in self.placements:
+            plc = self.placements[stem_name]
+            plc.x, plc.y, plc.z = 0.0, 0.0, 0.0
+            self.placement_changed.emit(stem_name, 0.0, 0.0, 0.0)
+            self._update_rays_cache()
+            self.update()
+
+    def _adjust_placement_z(self, stem_name: str, delta_z: float):
+        if stem_name in self.placements:
+            plc = self.placements[stem_name]
+            plc.z = max(0.0, min(1.0, round(plc.z + delta_z, 3)))
+            self.placement_changed.emit(stem_name, plc.x, plc.y, plc.z)
+            self._update_rays_cache()
+            self.update()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        key = event.key()
+        active = self.active_stem_name
+
+        if key == Qt.Key_Space:
+            self.playback_toggle_requested.emit()
+            event.accept()
+        elif key == Qt.Key_D:
+            if active:
+                self.toggle_stereo_mirror(active)
+                event.accept()
+        elif key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
+            if active:
+                self.copy_requested.emit(active)
+                event.accept()
+        elif key == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
+            if active:
+                self.duplicate_requested.emit(active)
+            else:
+                self.paste_requested.emit()
+            event.accept()
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
+            if active and ("::" in active or (active in self.placements and self.placements[active].source_stem_name not in (None, active))):
+                self.delete_requested.emit(active)
+                event.accept()
+        elif key == Qt.Key_0:
+            if active:
+                self._reset_placement_pos(active)
+                event.accept()
+        elif key == Qt.Key_Up:
+            if active:
+                self._adjust_placement_z(active, 0.05)
+                event.accept()
+        elif key == Qt.Key_Down:
+            if active:
+                self._adjust_placement_z(active, -0.05)
+                event.accept()
+        elif key == Qt.Key_Left:
+            self.seek_requested.emit(-5.0)
+            event.accept()
+        elif key == Qt.Key_Right:
+            self.seek_requested.emit(5.0)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:

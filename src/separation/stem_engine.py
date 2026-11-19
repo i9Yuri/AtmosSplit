@@ -301,10 +301,11 @@ class DeepStemEngine:
             progress_callback(0.25, "Inferência neural segmentada (baixo consumo de RAM)...")
 
         # Configurações de otimização de hardware no Xeon:
-        # segment=10.0: processa fatias de 10s mantendo o pico de RAM estável (< 1.2 GB)
+        # segment=None: permite que o Demucs htdemucs utilize seu segment nativo (7.8s),
+        # evitando incompatibilidade dimensional no reshape de tensores da arquitetura BagOfModels.
         # shifts=0 no fast, shifts=1 no surgical (evita reprocessamento desnecessário)
         shifts_val = 0 if mode == "fast" else 1
-        segment_val = 10.0
+        segment_val = None
         overlap_val = 0.25
 
         with torch.no_grad():

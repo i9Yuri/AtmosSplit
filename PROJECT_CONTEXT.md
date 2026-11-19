@@ -153,6 +153,21 @@ flowchart TD
 
 ## 7. Histórico de Versões e Decisões Críticas Recentes
 
+- **2026-11-19 (v1.7.1 — Correção de Segmento Demucs htdemucs, Anti-Travamento e Menu de Contexto 3D):**
+  - **Correção da Incompatibilidade Dimensional do Demucs (`apply_model`):**
+    - Identificada a causa raiz da falha de carregamento de faixas ("elementos não aparecem" / "Processo de IA finalizado ou cancelado"): o parâmetro hardcoded `segment=10.0` em `stem_engine.py` conflitou com os tensores de atenção posicional da arquitetura `htdemucs` (`BagOfModels`), cujo modelo opera internamente com `segment = 7.8s` (343.980 amostras a 44,1 kHz). O PyTorch disparava `shape '[1, 4, -1, 343980]' is invalid for input of size 3528000`.
+    - Ajustado para `segment = None`, permitindo que o Demucs utilize o tamanho nativo do modelo de forma automática com chunking e overlap perfeitos.
+  - **Notificação e Diagnóstico de Erros no Subprocesso de IA:**
+    - Corrigido o mascaramento silencioso em `main_window.py` onde qualquer encerramento com código diferente de 0 exibia genericamente "cancelado". O sistema agora captura mensagens emitidas no canal stdout/stderr e notifica o usuário via diálogo de erro explicativo em caso de falhas genuínas.
+  - **Eliminação de Race Conditions no Motor de Áudio (`AudioDSPState`):**
+    - O callback de áudio em tempo real agora lê estritamente um mapa imutável de instâncias e fontes (`dsp.stem_sources`) gerado de forma atômica no `AudioDSPState`.
+    - Eliminado o acesso concorrente a `self.placements` da thread gráfica, erradicando qualquer erro de `RuntimeError: dictionary changed size during iteration` durante arrastes ou clonagens.
+    - Removidas chamadas redundantes a `set_active_placements` em cada evento de mouse move, mantendo apenas `update_placement` com recálculo atômico e ultra-rápido do stem ativo.
+  - **Menu de Contexto Completo e Ações Rápidas na Sala 7.1.4:**
+    - Adicionado menu de botão direito interativo (`contextMenuEvent`) sobre os nós ou sala: alternar espelhamento estéreo (`D`), copiar elemento (`Ctrl+C`), duplicar como nova fonte 3D (`Ctrl+V`), excluir instância clonada (`Del`), centralizar (`0`) e ajustes de altura $Z$ em $\pm 10\%$.
+    - Adicionado botão direto `[➕]` no cabeçalho dos cards de stem para clonagem visual com um clique.
+  - **Validação Automatizada:**
+    - 28 testes unitários passando 100% (`pytest tests/test_atmossplit.py`), incluindo cobertura de atalhos e sinais de duplicação.
 - **2026-11-19 (v1.7.0 — Zoom na Timeline até Milissegundos e Clonagem de Nós Espaciais via Ctrl+C / Ctrl+V):**
   - **Zoom Adaptativo na Timeline (Até Escala de Milissegundos):** Implementado zoom de 1.0x até 128x via `Ctrl + Scroll` do mouse sobre a timeline ou botões táteis `[+]`, `[-]` e `[100%]`. A timeline possui régua temporal graduada que adapta a resolução até passos de 0.001s, com viewport desacoplado em `QScrollArea` e cortes de trechos (`split_section_at`) com precisão de milissegundo.
   - **Clonagem de Fontes Sonoras (Ctrl+C / Ctrl+V & Delete):** Fim da limitação de fonte única. O usuário pode selecionar qualquer nó no espaço 3D (ex: voz), pressionar `Ctrl+C` e `Ctrl+V` para duplicá-lo no espaço sonoro com sufixo `stem::index`. Cada cópia possui posicionamento $X, Y$, altitude $Z$, faders e espelhamento estéreo totalmente independentes, compartilhando o buffer de áudio original sem consumo adicional de memória. Clones podem ser removidos a qualquer momento via `Delete` ou botão `[×]`.

@@ -147,6 +147,8 @@ class MainWindow(QMainWindow):
         # Subprocesso de IA desacoplado (Zero congelamento de interface)
         self.separation_process: Optional[QProcess] = None
         self._current_task_info: Optional[Dict[str, str]] = None
+        self._last_worker_error: Optional[str] = None
+        self._user_cancelled_separation: bool = False
 
         # Player de áudio ao vivo de ultra-baixa latência com timeline conectada
         self.live_player = LiveSpatialPlayer(sample_rate=48000)
@@ -345,6 +347,12 @@ class MainWindow(QMainWindow):
         self.room_view.placement_changed.connect(self._on_room_placement_changed)
         self.room_view.stereo_toggled.connect(self._on_room_stereo_toggled)
         self.room_view.stem_selected.connect(self._on_room_stem_selected)
+        self.room_view.duplicate_requested.connect(self._duplicate_placement)
+        self.room_view.delete_requested.connect(self._delete_placement)
+        self.room_view.copy_requested.connect(self._copy_placement)
+        self.room_view.paste_requested.connect(self._paste_placement)
+        self.room_view.playback_toggle_requested.connect(self._toggle_preview_playback)
+        self.room_view.seek_requested.connect(self._seek_relative)
         content_splitter.addWidget(self.room_view)
 
         content_splitter.setSizes([340, 760])
@@ -751,6 +759,22 @@ class MainWindow(QMainWindow):
             else:
                 self.room_view.set_vu_levels({}, 0.0)
 
+    def _copy_placement(self, stem_name: str):
+        if stem_name in self.current_placements:
+            self._placement_clipboard = copy.copy(self.current_placements[stem_name])
+            self.statusBar().showMessage(f"📋 Copiado: '{stem_name}'. Pressione Ctrl+V ou use o menu para duplicar.", 3000)
+
+    def _paste_placement(self):
+        if self._placement_clipboard:
+            source = self._placement_clipboard.source_stem_name or self._placement_clipboard.stem_name
+            self._duplicate_placement(source)
+        elif self.room_view.active_stem_name:
+            self._duplicate_placement(self.room_view.active_stem_name)
+
+    def _seek_relative(self, delta_s: float):
+        cur_s = self.live_player.current_time_s
+        self.live_player.seek(max(0.0, (cur_s + delta_s) * self.live_player.sample_rate))
+
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         active_name = self.room_view.active_stem_name
@@ -764,15 +788,13 @@ class MainWindow(QMainWindow):
                 self.room_view.toggle_stereo_mirror(active_name)
                 event.accept()
         elif key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
-            if active_name in self.current_placements:
-                self._placement_clipboard = copy.copy(self.current_placements[active_name])
-                self.statusBar().showMessage(f"📋 Copiado: '{active_name}'. Pressione Ctrl+V para colar outra instância na sala.", 3000)
+            if active_name:
+                self._copy_placement(active_name)
                 event.accept()
         elif key == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
-            if active_name and self._placement_clipboard:
-                self._duplicate_placement(active_name)
-                event.accept()
-        elif key == Qt.Key_Delete:
+            self._paste_placement()
+            event.accept()
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
             if active_name:
                 self._delete_placement(active_name)
                 event.accept()
@@ -821,10 +843,11 @@ class MainWindow(QMainWindow):
             self.combo_presets.setCurrentIndex(4)
             event.accept()
         elif key == Qt.Key_Left:
-            cur_s = self.live_player.current_time_s
-            self.live_player.seek(max(0.0, (cur_s - 5.0) * self.live_player.sample_rate))
+            self._seek_relative(-5.0)
             event.accept()
         elif key == Qt.Key_Right:
+            self._seek_relative(5.0)
+            event.accept()
             cur_s = self.live_player.current_time_s
             self.live_player.seek(max(0.0, (cur_s + 5.0) * self.live_player.sample_rate))
             event.accept()
@@ -956,6 +979,9 @@ class MainWindow(QMainWindow):
         if self.separation_process is not None:
             self._cancel_separation_task()
 
+        self._last_worker_error = None
+        self._user_cancelled_separation = False
+
         self.progress_container.setVisible(True)
         self.progress_bar.setValue(5)
         self.statusBar().showMessage(f"Iniciando separação por IA ({mode})...")
@@ -983,6 +1009,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_separation_task(self):
         """Encerra instantaneamente o processo de IA e todas as threads filhas no Xeon."""
+        self._user_cancelled_separation = True
         if self.separation_process and self.separation_process.state() != QProcess.NotRunning:
             pid = self.separation_process.processId()
             try:
@@ -1018,17 +1045,29 @@ class MainWindow(QMainWindow):
                     self.progress_bar.setValue(val)
                     self.statusBar().showMessage(text)
                 elif m_type == "error":
-                    self.statusBar().showMessage(f"Erro: {msg.get('message')}")
+                    err_msg = msg.get("message", "Erro desconhecido")
+                    self._last_worker_error = err_msg
+                    self.statusBar().showMessage(f"Erro na IA: {err_msg}")
             except Exception:
                 pass
 
     def _on_worker_finished(self, exit_code: int, exit_status):
         self.progress_container.setVisible(False)
+        stderr_output = ""
+        if self.separation_process:
+            try:
+                stderr_output = self.separation_process.readAllStandardError().data().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                pass
         self.separation_process = None
 
         if exit_code != 0:
-            if self._current_task_info:
-                self.statusBar().showMessage("Processo de IA finalizado ou cancelado.")
+            if self._user_cancelled_separation:
+                self.statusBar().showMessage("Separação cancelada pelo usuário.")
+            else:
+                err = self._last_worker_error or stderr_output or "Processo de IA encerrou com erro."
+                self.statusBar().showMessage(f"Falha na IA: {err}")
+                QMessageBox.critical(self, "Falha na Separação por IA", f"A separação dos instrumentos encontrou um erro:\n\n{err}")
             return
 
         if not self._current_task_info:
@@ -1092,15 +1131,22 @@ class MainWindow(QMainWindow):
             card.changed.connect(self._on_stem_card_changed)
             card.selected.connect(self.room_view.set_active_stem)
             card.delete_requested.connect(self._delete_placement)
+            card.duplicate_requested.connect(self._duplicate_placement)
             self.stems_layout.insertWidget(self.stems_layout.count() - 1, card)
             self.stem_cards[instance_name] = card
 
-    def _duplicate_placement(self, source_name: str):
+    def _duplicate_placement(self, source_name: Optional[str] = None):
         section = self.timeline_manager.get_active_edit_section()
-        source = section.placements.get(source_name)
+        target_name = source_name or self.room_view.active_stem_name
+        source = section.placements.get(target_name) if target_name else None
+        if source is None:
+            if self._placement_clipboard:
+                clip_base = self._placement_clipboard.source_stem_name or self._placement_clipboard.stem_name
+                source = section.placements.get(clip_base)
+                target_name = clip_base
         if source is None:
             return
-        base_name = source.source_stem_name or source_name
+        base_name = source.source_stem_name or target_name
         index = 2
         while f"{base_name}::{index}" in section.placements:
             index += 1
@@ -1108,7 +1154,8 @@ class MainWindow(QMainWindow):
         placement = copy.copy(self._placement_clipboard or source)
         placement.stem_name = instance_name
         placement.source_stem_name = base_name
-        placement.x = max(-1.0, min(1.0, placement.x + 0.12))
+        placement.x = max(-0.95, min(0.95, placement.x + 0.15))
+        placement.y = max(-0.95, min(0.95, placement.y - 0.10))
         section.placements[instance_name] = placement
         self._stem_audio_by_instance[instance_name] = self._stem_audio_by_instance[base_name]
         self.current_placements = section.placements
@@ -1168,7 +1215,6 @@ class MainWindow(QMainWindow):
             active_sec.placements[stem_name].y = y
             active_sec.placements[stem_name].z = z
         self.live_player.update_placement(stem_name, x, y, z)
-        self.live_player.set_active_placements(self.current_placements)
 
     def _on_room_stereo_toggled(self, stem_name: str, is_stereo: bool):
         if stem_name in self.stem_cards:
@@ -1180,7 +1226,6 @@ class MainWindow(QMainWindow):
         if plc:
             plc.is_stereo = is_stereo
             self.live_player.update_placement(stem_name, plc.x, plc.y, plc.z, is_stereo=is_stereo)
-            self.live_player.set_active_placements(self.current_placements)
         status_msg = f"{stem_name}: Espelhamento Estéreo {'ATIVADO (L / R)' if is_stereo else 'DESATIVADO (Mono)'}"
         self.statusBar().showMessage(status_msg, 3000)
 

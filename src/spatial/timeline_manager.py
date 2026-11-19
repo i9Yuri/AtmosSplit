@@ -211,19 +211,20 @@ class SpatialTimelineManager:
         Retorna os vetores de ganhos (L e R) interpolados suavemente por crossfade vetorial direto.
         Zero cálculo trigonométrico em tempo real: pura soma e multiplicação de vetores (12 floats).
         """
-        if not self.sections:
+        sections = list(self.sections)
+        if not sections:
             return None, None
 
-        if len(self.sections) == 1:
-            sec = self.sections[0]
+        if len(sections) == 1:
+            sec = sections[0]
             return sec.cached_gains_l.get(stem_name), sec.cached_gains_r.get(stem_name)
 
         t = max(0.0, min(self.total_duration_s, float(time_s)))
         half_w = max(0.05, crossfade_window_s / 2.0)
 
-        for idx in range(len(self.sections) - 1):
-            sec_a = self.sections[idx]
-            sec_b = self.sections[idx + 1]
+        for idx in range(len(sections) - 1):
+            sec_a = sections[idx]
+            sec_b = sections[idx + 1]
             boundary = sec_b.start_time_s
 
             if (boundary - half_w) <= t <= (boundary + half_w):

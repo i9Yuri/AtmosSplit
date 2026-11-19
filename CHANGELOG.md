@@ -2,6 +2,25 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.7.1] - 2026-11-19
+### Corrigido & Aprimorado (Correção Dimensional do Demucs htdemucs, Anti-Travamento e Menu de Contexto 3D)
+- **Correção da Incompatibilidade Dimensional do Demucs (`apply_model`):**
+  - Identificada e corrigida a causa raiz da falha de carregamento de músicas onde o processo encerrava com "Processo de IA finalizado ou cancelado" e nenhum stem ou puck aparecia na sala.
+  - O parâmetro hardcoded `segment=10.0` em `stem_engine.py` causava conflito com o segment fixo de 7.8s ($343.980$ amostras) da arquitetura `htdemucs`, gerando exceção `shape '[1, 4, -1, 343980]' is invalid for input of size 3528000`.
+  - Configurado `segment = None`, permitindo que o Demucs decomponha e processe qualquer arquivo de áudio utilizando nativamente a janela treinada do modelo.
+- **Relatório e Diagnóstico Claro de Erros no Subprocesso de IA:**
+  - Corrigido o mascaramento de erros em `_on_worker_finished`: erros reais do worker agora são capturados do stdout/stderr e apresentados ao usuário via diálogo explicativo em vez de exibir a mensagem genérica de cancelamento.
+- **Eliminação de Condições de Corrida no Player de Áudio (`AudioDSPState`):**
+  - Implementado o campo `stem_sources` dentro do `AudioDSPState`, garantindo que o callback do PortAudio nunca acesse o dicionário mutável `self.placements` da interface gráfica.
+  - Eliminado o risco de `RuntimeError: dictionary changed size during iteration` durante arraste, clonagem ou remoção de instrumentos.
+  - Removido recálculo redundante de todos os stems em `_on_room_placement_changed`, liberando CPU e garantindo 60 FPS lisos durante o movimento de bolinhas.
+- **Menu de Contexto Completo e Ações Rápidas na Sala 7.1.4 (`RoomView714`):**
+  - Botão direito do mouse agora abre menu de contexto profissional com opções de espelhamento estéreo (`D`), cópia (`Ctrl+C`), clonagem / nova fonte 3D (`Ctrl+V`), exclusão (`Del`), centralização (`0`) e altitude $Z$.
+  - Botão `[➕]` adicionado diretamente aos cards de instrumentos para clonagem com 1 clique.
+  - Atalhos de teclado universais operando de forma idêntica tanto com foco na sala quanto na janela principal.
+- **Validação Automatizada:**
+  - 28 testes automatizados executando com 100% de aprovação.
+
 ## [1.7.0] - 2026-11-19
 ### Adicionado & Aprimorado (Zoom na Timeline com Precisão de Milissegundos e Clonagem de Nós Espaciais via Ctrl+C / Ctrl+V)
 - **Zoom Adaptativo na Timeline (Até Escala de Milissegundos):**

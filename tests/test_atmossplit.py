@@ -889,6 +889,64 @@ def test_spatial_placement_cloning_and_multichannel_render():
     assert top_energy > 0, "Instância clonada no teto deve alimentar os canais de altura"
 
 
+def test_room_view_signals_and_keyboard_shortcuts():
+    """Valida atalhos de teclado e sinais de duplicação/espelhamento na sala 7.1.4."""
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import Qt
+    import sys
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    room = RoomView714()
+    room.resize(600, 500)
+
+    sr = 48000
+    stem = StemTrack(name="vocals", display_name="Vozes", color_hex="#00E5FF", audio_data=np.zeros((sr, 2), dtype=np.float32), sample_rate=sr)
+    plc = SpatialPlacement("vocals", x=0.0, y=0.8, z=0.1, spread=0.2, lfe_send=0.0, volume_gain=1.0)
+    room.set_stems_and_placements([stem], {"vocals": plc})
+    room.active_stem_name = "vocals"
+
+    # Teste tecla D (toggle estéreo)
+    event_d = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_D, Qt.NoModifier)
+    room.keyPressEvent(event_d)
+    assert room.placements["vocals"].is_stereo is True
+
+    # Teste tecla 0 (centralizar)
+    event_0 = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_0, Qt.NoModifier)
+    room.keyPressEvent(event_0)
+    assert room.placements["vocals"].x == 0.0
+    assert room.placements["vocals"].y == 0.0
+    assert room.placements["vocals"].z == 0.0
+
+    # Teste tecla Up (ajuste Z)
+    event_up = QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Up, Qt.NoModifier)
+    room.keyPressEvent(event_up)
+    assert room.placements["vocals"].z > 0.0
+
+
+def test_stem_card_duplicate_button_and_signal():
+    """Valida existência do botão de duplicação direta (➕) no StemControlCard."""
+    from PySide6.QtWidgets import QApplication
+    import sys
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    sr = 48000
+    stem = StemTrack(name="drums", display_name="Bateria", color_hex="#FF9100", audio_data=np.zeros((sr, 2), dtype=np.float32), sample_rate=sr)
+    plc = SpatialPlacement("drums", x=0.2, y=0.0, z=0.0, spread=0.2, lfe_send=0.0, volume_gain=1.0)
+
+    from src.ui.stem_card import StemControlCard
+    card = StemControlCard(stem, plc)
+
+    assert hasattr(card, "btn_clone")
+    assert card.btn_clone.text() == "➕"
+
+    received_signals = []
+    card.duplicate_requested.connect(lambda name: received_signals.append(name))
+    card.btn_clone.click()
+    assert received_signals == ["drums"]
+
+
+
 
 
 
