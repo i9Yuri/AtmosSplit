@@ -78,9 +78,9 @@
     "semantic_hash": ""
   },
   "src/playback/exporter.py": {
-    "mtime": 1795094159.9172602,
-    "seen": 1795095267.8943384,
-    "ast_hash": "764e8e193ae43873289c99e590e39f13",
+    "mtime": 1795105129.060937,
+    "seen": 1795105413.8067212,
+    "ast_hash": "942ce51e546c2d1966bfcec1b6b20522",
     "semantic_hash": ""
   },
   "src/playback/samsung_dlna_bridge.py": {
@@ -108,9 +108,9 @@
     "semantic_hash": ""
   },
   "src/separation/stem_engine.py": {
-    "mtime": 1795091645.0142477,
-    "seen": 1795095267.8943632,
-    "ast_hash": "a2c2615e06886a2275ee0429adfe6d52",
+    "mtime": 1795105136.6250122,
+    "seen": 1795105413.8067367,
+    "ast_hash": "e795843a462d46ea48d72791187ec489",
     "semantic_hash": ""
   },
   "src/separation/worker_cli.py": {
@@ -132,9 +132,9 @@
     "semantic_hash": ""
   },
   "src/spatial/auto_director.py": {
-    "mtime": 1795094767.47218,
-    "seen": 1795095267.894379,
-    "ast_hash": "0d5d573255c8c1749bc7b823ae2345f5",
+    "mtime": 1795105175.856402,
+    "seen": 1795105413.8067484,
+    "ast_hash": "4a2c6d88c0deaa0276a8cad8e8bb40a7",
     "semantic_hash": ""
   },
   "src/spatial/binaural_hrtf.py": {
@@ -150,9 +150,9 @@
     "semantic_hash": ""
   },
   "src/spatial/master_renderer.py": {
-    "mtime": 1795094793.9654326,
-    "seen": 1795095267.8943887,
-    "ast_hash": "2bfcded1ca69de8d881c670860ae6c79",
+    "mtime": 1795105234.108981,
+    "seen": 1795105413.8067577,
+    "ast_hash": "66a94d4c4d143b0c6930ae8080313814",
     "semantic_hash": ""
   },
   "src/spatial/timeline_manager.py": {
@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "src/ui/main_window.py": {
-    "mtime": 1795095081.1891615,
-    "seen": 1795095267.894402,
-    "ast_hash": "299c72b9b3b9160ea430ffc97ecc3f28",
+    "mtime": 1795095553.4646628,
+    "seen": 1795105413.8067696,
+    "ast_hash": "cf5b1f6f3e31627a19b5e58b1d8a9185",
     "semantic_hash": ""
   },
   "src/ui/room_view_714.py": {
@@ -204,15 +204,15 @@
     "semantic_hash": ""
   },
   "tests/test_atmossplit.py": {
-    "mtime": 1795095127.0985978,
-    "seen": 1795095267.894418,
-    "ast_hash": "cf07182c6106081908bfa346d1276adf",
+    "mtime": 1795105268.1893198,
+    "seen": 1795105413.8067846,
+    "ast_hash": "19a6c99a0d1e011e2c4696e05aee290e",
     "semantic_hash": ""
   },
   "CHANGELOG.md": {
-    "mtime": 1795095244.3157115,
-    "seen": 1795095267.894421,
-    "ast_hash": "fc6e44c7f8a1fed9b944f93b0d383536",
+    "mtime": 1795105346.4300976,
+    "seen": 1795105413.8067882,
+    "ast_hash": "012aa2fffec691331b83c641d161a1c8",
     "semantic_hash": ""
   },
   "ENVIRONMENT_REPORT.md": {
@@ -222,15 +222,15 @@
     "semantic_hash": ""
   },
   "PROJECT_CONTEXT.md": {
-    "mtime": 1795095226.5095422,
-    "seen": 1795095267.8944273,
-    "ast_hash": "9697ea4bf2f3c0b53c95a00385cbd6bd",
+    "mtime": 1795105325.3318877,
+    "seen": 1795105413.8067942,
+    "ast_hash": "8ffdedb3ce5e1e3c25ba4b4b5d882b59",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1795090382.526142,
-    "seen": 1795095267.8944306,
-    "ast_hash": "f6f74543a1f487b21071b24c87c2d354",
+    "mtime": 1795095582.2289376,
+    "seen": 1795105413.806798,
+    "ast_hash": "915e20b0d42e7971d0ad78444f1851a5",
     "semantic_hash": ""
   },
   "requirements.txt": {
@@ -249,66 +249,6 @@
     "mtime": 1795090872.0048642,
     "seen": 1795095267.8944464,
     "ast_hash": "9d3c553bd2beb88fa8172ddbd8025371",
-    "semantic_hash": ""
-  },
-  "test_truehd.mkv": {
-    "mtime": 1795089761.7286627,
-    "seen": 1795095267.8944497,
-    "ast_hash": "070cd61055655a28f622472b238773e7",
-    "semantic_hash": ""
-  },
-  "tests/benchmark_data/demucs_out/htdemucs/test_polyphonic_30s/bass.wav": {
-    "mtime": 1795089839.0264373,
-    "seen": 1795095267.8944542,
-    "ast_hash": "63eaadd47f8823d80854bce5ea44a0c2",
-    "semantic_hash": ""
-  },
-  "tests/benchmark_data/demucs_out/htdemucs/test_polyphonic_30s/drums.wav": {
-    "mtime": 1795089839.0072305,
-    "seen": 1795095267.8944576,
-    "ast_hash": "f01fb333d8acbfe086131a0e3b446664",
-    "semantic_hash": ""
-  },
-  "tests/benchmark_data/demucs_out/htdemucs/test_polyphonic_30s/other.wav": {
-    "mtime": 1795089839.0442867,
-    "seen": 1795095267.894461,
-    "ast_hash": "e30333f9a730b99fff8dafcdc54de79a",
-    "semantic_hash": ""
-  },
-  "tests/benchmark_data/demucs_out/htdemucs/test_polyphonic_30s/vocals.wav": {
-    "mtime": 1795089839.0643144,
-    "seen": 1795095267.8944643,
-    "ast_hash": "f7f7138518f18793fc77d39e25bd0041",
-    "semantic_hash": ""
-  },
-  "tests/benchmark_data/test_polyphonic_30s.wav": {
-    "mtime": 1795089753.639596,
-    "seen": 1795095267.8944674,
-    "ast_hash": "9c4ccaa61fea3b1ec50c834c8870a574",
-    "semantic_hash": ""
-  },
-  "tests/multichannel_diagnostics/test_714_channels.wav": {
-    "mtime": 1795089785.8308616,
-    "seen": 1795095267.8944707,
-    "ast_hash": "49a679cbe4983ee0c8bcbab283746acc",
-    "semantic_hash": ""
-  },
-  "tests/multichannel_diagnostics/test_714_lpcm.mkv": {
-    "mtime": 1795089786.9248705,
-    "seen": 1795095267.8944738,
-    "ast_hash": "750ef8fbab6928d09f93133aeb77aba2",
-    "semantic_hash": ""
-  },
-  "tests/multichannel_diagnostics/test_71_eac3.mkv": {
-    "mtime": 1795089789.5798924,
-    "seen": 1795095267.894477,
-    "ast_hash": "9bf9819b732538a50cb495160a2b7167",
-    "semantic_hash": ""
-  },
-  "tests/multichannel_diagnostics/test_71_truehd.mkv": {
-    "mtime": 1795089788.4568832,
-    "seen": 1795095267.8944802,
-    "ast_hash": "866970d1d47a94437f3bc8980d1d3fdf",
     "semantic_hash": ""
   }
 }
