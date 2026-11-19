@@ -985,7 +985,12 @@ def test_song_structure_intelligence_and_vocal_throw():
     ]
 
     sections = SongStructureIntelligence.analyze_and_arrange(stems, duration_s, DirectorPreset.BALANCED)
-    assert len(sections) >= 3, "Música de 3 minutos deve gerar múltiplas seções estruturadas"
+    assert len(sections) >= 8, f"Música de 3 minutos deve gerar frases musicais granulares (obteve {len(sections)})"
+
+    # Verificar que os blocos são musicais e não monólitos gigantes
+    durations = [s.end_time_s - s.start_time_s for s in sections]
+    avg_dur = sum(durations) / len(durations)
+    assert 6.0 <= avg_dur <= 25.0, f"Duração média das frases deve ser musical (~8s a 20s), obteve {avg_dur:.1f}s"
 
     # Verificar continuidade temporal estrita
     assert sections[0].start_time_s == 0.0
@@ -997,21 +1002,37 @@ def test_song_structure_intelligence_and_vocal_throw():
     has_throw = any("vocals::spatial_throw" in sec.placements for sec in sections)
     assert has_throw, "Efeito Last Christmas deve gerar instância 'vocals::spatial_throw' para módulos traseiros"
 
-    # Verificar comportamento por seção:
+    # Verificar dinâmica espacial real entre seções (não apenas volume)
     chorus_sec = next((s for s in sections if "refrão" in s.name.lower() or "clímax" in s.name.lower()), None)
     verse_sec = next((s for s in sections if "verso" in s.name.lower()), None)
-
-    if chorus_sec:
-        throw_chorus = chorus_sec.placements.get("vocals::spatial_throw")
-        assert throw_chorus is not None
-        assert not throw_chorus.is_muted
-        assert throw_chorus.volume_gain >= 1.2, "No refrão o vocal throw deve ser proeminente e bem destacado"
-        assert throw_chorus.y <= -0.7, "No refrão o vocal throw deve sair nos módulos traseiros destacáveis (BL/BR)"
+    buildup_sec = next((s for s in sections if "build-up" in s.name.lower() or "ascensão" in s.name.lower()), None)
 
     if verse_sec:
+        v_voc = verse_sec.placements.get("vocals")
+        assert v_voc is not None
+        assert v_voc.y >= 0.90, "No verso a voz deve estar ancorada no centro frontal (Center)"
+        assert v_voc.z <= 0.15, "No verso a voz deve estar ao nível do ouvido, sem subir ao teto"
+
         throw_verse = verse_sec.placements.get("vocals::spatial_throw")
         assert throw_verse is not None
         assert throw_verse.is_muted or throw_verse.volume_gain == 0.0, "No verso a voz deve permanecer pura e intimista na frente"
+
+    if buildup_sec:
+        b_voc = buildup_sec.placements.get("vocals")
+        if b_voc:
+            assert b_voc.z >= 0.35, "No build-up os vocais devem ascender verticalmente em direção ao teto"
+
+    if chorus_sec:
+        c_other = chorus_sec.placements.get("other")
+        if c_other:
+            assert c_other.x >= 0.75, "No refrão sintetizadores e harmonia devem abraçar o ouvinte com abertura 360°"
+            assert c_other.y <= 0.0, "No refrão o envelope sonoro deve envolver os lados e a traseira"
+
+        throw_chorus = chorus_sec.placements.get("vocals::spatial_throw")
+        assert throw_chorus is not None
+        assert not throw_chorus.is_muted
+        assert throw_chorus.volume_gain >= 1.25, "No refrão o vocal throw deve ser proeminente e bem destacado"
+        assert throw_chorus.y <= -0.70, "No refrão o vocal throw deve sair nos módulos traseiros destacáveis (BL/BR)"
 
 
 def test_timeline_interactive_boundary_drag_and_minimap():

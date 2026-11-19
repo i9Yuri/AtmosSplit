@@ -153,6 +153,16 @@ flowchart TD
 
 ## 7. Histórico de Versões e Decisões Críticas Recentes
 
+- **2026-11-19 (v1.8.1 — Particionamento Frase a Frase Inteligente e Movimentação Espacial 3D Ativa):**
+  - **Particionamento Musical Granular (Subdivisão de Frases 8s a 20s):**
+    - Substituída a partição macro percentual por detecção de novidade de sinal e fluxo espectral ($\Delta E$), cortes de percussão (drop gaps) e pausas de fraseado vocal (VAD).
+    - Mapeamento de 8 a 16 frases musicais autênticas por faixa de 3 a 4 minutos (Intro Ambient, Intro Beat, Verso 1A Seco, Verso 1B Groove, Pré-Refrão Riser, Refrão Drop, Hook & Eco Traseiro, Verso 2 Contraste, Breakdown Celestial no teto, Clímax 7.1.4, Outro Descompressão e Dissolução).
+  - **Coreografia Espacial 3D Real nos Objetos (Não Apenas Volume):**
+    - *Vozes (`vocals`):* Ancoragem seca no chão frontal ($x=0, y=0.98, z=0$) nos versos, ascensão vertical ($z=0.48$) no build-up, suspensão celestial no teto ($y=0.20, z=0.68$) no breakdown, e recuo traseiro suave no outro.
+    - *Bateria (`drums`):* Kit seco ao nível do ouvido no verso, ascensão vertical ($z=0.62$) de viradas e esteiras no build-up, dispersão nas alturas frontais/traseiras ($z=0.45$) com punch LFE no refrão, e silêncio intencional ($is\_muted=True$) no breakdown.
+    - *Instrumentos Harmônicos (`other`):* Flancos laterais ($x=\pm 0.68, y=0.20, z=0.10$) no verso para liberar o canal central para a voz, riser ascendente ($z=0.88$) no build-up, abraço 360° total ($x=\pm 0.88, y=-0.25, z=0.45$) no refrão, e halo celestial diretamente sobre a cabeça ($z=0.90$) no breakdown.
+    - *Vocal Throw Traseiro (`vocals::spatial_throw`):* Muted no verso e saltando com ganho $1.35$ nos módulos destacáveis traseiros da JBL Bar 1000 nos refrões.
+  - **Validação de Testes:** 30 testes unitários passando 100% cobrindo a nova métrica de granularidade de frases e as coordenadas espaciais 3D reativas.
 - **2026-11-19 (v1.8.0 — IA Maestro com Arranjo Estrutural Autônomo, Efeito Vocal Throw 7.1.4 e Timeline Profissional Estilo DAW):**
   - **Arranjo Musical Inteligente Autônomo (`SongStructureIntelligence` / IA Maestro):**
     - Analisador musical algorítmico que decompõe faixas por perfil de energia RMS contínuo, curvas de atividade vocal (VAD) e transientes rítmicos.

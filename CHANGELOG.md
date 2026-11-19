@@ -2,6 +2,33 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.8.1] - 2026-11-19
+### Aprimorado (Particionamento Frase a Frase Inteligente e Movimentação Espacial 3D Dinâmica em Todos os Objetos)
+- **Particionamento Musical Granular e Fraseado Autônomo:**
+  - Substituída a divisão macro de blocos estáticos por detector dinâmico de transições baseado em fluxo de energia ($\Delta E$), curvas de novidade, detecção de pausas de fraseado vocal (VAD) e vales de percussão (drop gaps).
+  - A música agora é dividida em frases orgânicas de **8 a 20 segundos** (8 a 16 seções por faixa), refletindo o fraseado musical real (ex: Intro Ambiance, Intro Beat, Verso 1A Seco, Verso 1B Groove, Pré-Refrão / Riser, Refrão Drop, Hook & Eco Traseiro, Verso 2 Contraste, Breakdown Celestial, Clímax 7.1.4, Outro Descompressão e Dissolução).
+- **Coreografia Espacial 3D Real em Vez de Apenas Ajuste de Volume:**
+  - **Vozes (`vocals`):**
+    - *Verso Seco / Contraste:* Ancoragem cristalina estrita no centro frontal ($x=0.0, y=0.98, z=0.0$, $spread=0.05$).
+    - *Build-up:* A voz ascende verticalmente em direção aos canais de teto ($z=0.48$, $spread=0.35$), criando expectativa e tensão.
+    - *Breakdown:* A voz flutua suspensa no meio da sala e no teto ($y=0.20, z=0.68$, $spread=0.65$), gerando sensação celestial imersiva.
+    - *Outro:* A voz recua suavemente em direção aos satélites traseiros ($y=-0.45, z=0.72$).
+  - **Bateria / Percussão (`drums`):**
+    - *Verso:* Kit seco, focado e firme no chão ($y=0.65, z=0.0$).
+    - *Build-up:* Esteiras e viradas sobem verticalmente ao teto ($z=0.62$, $spread=0.50$).
+    - *Refrão / Clímax:* Kit amplo com pratos distribuídos no teto frontal/traseiro ($z=0.45$, $spread=0.55$) e soco de subwoofer 10" via LFE 1.0.
+    - *Breakdown:* Bateria cessa completamente ($gain=0.15, is\_muted=True$), criando contraste dramático com a voz.
+  - **Instrumentos Harmônicos / Sintetizadores (`other`):**
+    - *Verso:* Puxados deliberadamente para os flancos laterais ($x=\pm 0.68, y=0.20, z=0.10$), desobstruindo o centro para a voz.
+    - *Build-up:* Riser acústico ascendente em espiral ao teto ($x=\pm 0.68, y=0.15, z=0.88$, $spread=0.75$).
+    - *Refrão:* Envolvimento 360° total abraçando as laterais ($SL/SR$) e traseira ($BL/BR$) com amplitude estéreo ($x=\pm 0.88, y=-0.25, z=0.45$).
+    - *Breakdown:* Acordes e pads pairam diretamente sobre a cabeça do ouvinte no teto ($z=0.90, spread=0.85$).
+  - **Vocal Throw Traseiro (`vocals::spatial_throw`):**
+    - Muted nos versos, ativando com potência ($gain = 1.35, x = \pm 0.72, y = -0.82, z = 0.50$) diretamente nos módulos destacáveis traseiros da JBL Bar 1000 durante os refrões e clímax.
+- **Validação de Testes:**
+  - Suíte de 30 testes unitários validada com 100% de aprovação comprovando as novas métricas de granularidade de frases e coordenadas 3D reativas.
+
+
 ## [1.8.0] - 2026-11-19
 ### Adicionado & Aprimorado (IA Maestro com Arranjo Estrutural Autônomo, Efeito Vocal Throw 7.1.4 e Timeline Profissional Estilo DAW)
 - **Arranjo Musical Inteligente Autônomo (SongStructureIntelligence / IA Maestro):**
