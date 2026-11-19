@@ -557,3 +557,119 @@ def test_room_view_stereo_pucks_and_toggle():
     view.toggle_stereo_mirror("cymbals")
     assert plc.is_stereo is True
 
+
+def test_exporter_etsi_ts_103_420_coordinates(tmp_path: Path):
+    """
+    Valida que a codificação Dolby Atmos E-AC-3 JOC via ac3forge segue estritamente
+    a norma ETSI TS 103 420 (§4.2.1) para os 12 canais 7.1.4:
+    - X: 0.0 (Esq), 0.5 (Centro), 1.0 (Dir)
+    - Y: 0.0 (Frente / TV), 0.5 (Laterais/Ouvinte), 1.0 (Traseira)
+    - Z: 0.0 (Ouvido), 1.0 (Teto)
+    Comprova que a Voz / Centro (Obj 2) NÃO sai mais no módulo traseiro esquerdo!
+    """
+    import ac3forge
+
+    sr = 48000
+    spf = ac3forge.SAMPLES_PER_FRAME
+    matrix_12ch = np.zeros((spf, 12), dtype=np.float32)
+    # Sinal no canal Center (canal 2)
+    matrix_12ch[:, 2] = np.sin(2 * np.pi * 1000 * np.linspace(0, 0.032, spf)) * 0.5
+
+    temp_ec3 = tmp_path / "test_etsi.ec3"
+    AudioExporter714._encode_eac3_joc_stream(matrix_12ch, temp_ec3, sample_rate=sr, bitrate_kbps=768)
+    assert temp_ec3.exists()
+
+    with open(temp_ec3, "rb") as f:
+        stream_bytes = f.read()
+
+    dec = ac3forge.Eac3Decoder()
+    unit = dec.decode_access_unit(stream_bytes[:3072])
+    assert unit is not None
+    assert unit.object_metadata is not None
+    objs = unit.object_metadata.objects
+    assert len(objs) == 12
+
+    # Obj 0: Frontal Esquerdo (FL) -> x=0.0, y=0.0, z=0.0
+    assert objs[0].position.x == pytest.approx(0.0, abs=0.05)
+    assert objs[0].position.y == pytest.approx(0.0, abs=0.05)
+    assert objs[0].position.z == pytest.approx(0.0, abs=0.05)
+
+    # Obj 1: Frontal Direito (FR) -> x=1.0, y=0.0, z=0.0
+    assert objs[1].position.x == pytest.approx(1.0, abs=0.05)
+    assert objs[1].position.y == pytest.approx(0.0, abs=0.05)
+
+    # Obj 2: FRONTAL CENTRAL (FC - Lead Vocal) -> x=0.5, y=0.0 (FRENTE E CENTRO!)
+    assert objs[2].position.x == pytest.approx(0.5, abs=0.05), "FC deve estar no centro (x=0.5)!"
+    assert objs[2].position.y == pytest.approx(0.0, abs=0.05), "FC deve estar na parede frontal (y=0.0), NÃO na traseira!"
+
+    # Obj 4: Traseiro Esquerdo (BL - Módulo destacável esquerdo) -> x=0.0, y=1.0
+    assert objs[4].position.x == pytest.approx(0.0, abs=0.05)
+    assert objs[4].position.y == pytest.approx(1.0, abs=0.05)
+
+    # Obj 8: Teto Frontal Esquerdo (TFL) -> x=0.0, y=0.0, z=1.0 (Teto)
+    assert objs[8].position.z == pytest.approx(1.0, abs=0.05)
+
+
+def test_immersion_360_lead_vocal_anchored():
+    """
+    Valida que no preset IMMERSION_360 (Imersão 360°), a voz principal e o bumbo
+    permanecem estritamente ancorados na frente (Center/Front) para foco vocal profissional,
+    enquanto instrumentos, harmonias e ambiências criam o campo envolvente 360°.
+    """
+    sr = 48000
+    dummy_audio = np.zeros((sr, 2), dtype=np.float32)
+
+    profiles = {
+        "lead_vocal": AcousticAnalyzer.analyze_stem("lead_vocal", dummy_audio, sr),
+        "backing_vocals": AcousticAnalyzer.analyze_stem("backing_vocals", dummy_audio, sr),
+        "kick": AcousticAnalyzer.analyze_stem("kick", dummy_audio, sr),
+        "air_ambience": AcousticAnalyzer.analyze_stem("air_ambience", dummy_audio, sr),
+    }
+
+    plcs = AutoAtmosDirector.generate_placements(profiles, DirectorPreset.IMMERSION_360)
+
+    # 1. Lead Vocal DEVE estar ancorado na frente
+    assert plcs["lead_vocal"].x == pytest.approx(0.0, abs=0.05)
+    assert plcs["lead_vocal"].y >= 0.85
+    assert plcs["lead_vocal"].is_stereo is False
+
+    # 2. Bumbo DEVE estar ancorado na frente
+    assert plcs["kick"].x == pytest.approx(0.0, abs=0.05)
+    assert plcs["kick"].y >= 0.70
+    assert plcs["kick"].is_stereo is False
+
+    # 3. Backing Vocals abrem em estéreo envolvente traseiro/lateral
+    assert plcs["backing_vocals"].is_stereo is True
+    assert plcs["backing_vocals"].y < 0.0
+
+    # 4. Ambiência aérea sobe ao teto com 360°
+    assert plcs["air_ambience"].is_stereo is True
+    assert plcs["air_ambience"].z >= 0.85
+
+
+def test_k_weighted_lufs_loudness_and_true_peak():
+    """
+    Valida o medidor de sonoridade ITU-R BS.1770-4 K-weighting e o limiter True Peak (-1.0 dBTP).
+    """
+    sr = 48000
+    num_samples = sr * 2
+    t = np.linspace(0, 2.0, num_samples, endpoint=False)
+
+    # Onda senoidal de 1 kHz a 0 dBFS no canal Center
+    matrix = np.zeros((num_samples, 12), dtype=np.float32)
+    matrix[:, 2] = np.sin(2 * np.pi * 1000.0 * t) * 0.9
+
+    lufs = MasterRenderer714._calculate_k_weighted_lufs(matrix, sr=sr)
+    # 1 kHz a 0.9 peak tem ~ -4.0 a -3.0 LUFS
+    assert -10.0 < lufs < 0.0
+
+    renderer = MasterRenderer714()
+    # Aplicar normalização para -18 LUFS com teto -1.0 dBTP
+    norm_matrix = renderer._apply_integrated_loudness_target(matrix, target_lufs=-18.0, sr=sr)
+    limited_matrix = renderer._apply_transparent_limiter(norm_matrix, ceiling_db=-1.0)
+
+    # True peak máximo deve respeitar -1.0 dBTP (10^(-1/20) ~= 0.8913)
+    max_peak = float(np.max(np.abs(limited_matrix)))
+    assert max_peak <= 0.892, f"Pico excedeu o teto True Peak: {max_peak}"
+
+

@@ -371,10 +371,19 @@ class DeepStemEngine:
 
             # --- C. VOZES (vocals) ---
             vocals = macro_stems.get("vocals", np.zeros_like(audio_array))
+            # Isolamento coerente em fase para Lead Vocal (centro) e Backing Vocals (estéreo envolvente)
             mid = 0.5 * (vocals[:, 0] + vocals[:, 1])
-            side = 0.5 * (vocals[:, 0] - vocals[:, 1])
             lead_vocal = np.column_stack([mid, mid])
-            backing_vocals = np.column_stack([side, -side])
+
+            # Backing vocals: extração estéreo pura SEM inversão de polaridade (proibido [+side, -side])
+            # Subtrai a maior parte do centro comum (85%), isolando backing vocals, harmonias e reverbs
+            side_l = vocals[:, 0] - 0.85 * mid
+            side_r = vocals[:, 1] - 0.85 * mid
+            # Filtro passa-altas Linkwitz/Butterworth de 4ª ordem em 180 Hz para eliminar vazamento sub-grave
+            sos_vocal_hp = signal.butter(4, 180.0, btype="highpass", fs=orig_sr, output="sos")
+            backing_l = signal.sosfiltfilt(sos_vocal_hp, side_l)
+            backing_r = signal.sosfiltfilt(sos_vocal_hp, side_r)
+            backing_vocals = np.column_stack([backing_l, backing_r])
 
             stems_dict["lead_vocal"] = lead_vocal
             stems_dict["backing_vocals"] = backing_vocals

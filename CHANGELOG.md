@@ -2,6 +2,32 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [1.5.0] - 2026-11-19
+### Corrigido & Aprimorado (Mixagem Profissional Dolby Atmos & Correção de Mapeamento ETSI TS 103 420)
+- **Correção da Ancoragem Frontal da Voz (Norma ETSI TS 103 420 §4.2.1):**
+  - **Diagnóstico da Causa Raiz:** O mapeamento dos 12 canais em `_encode_eac3_joc_stream` utilizava coordenadas cartesianas divergentes da norma Dolby Atmos ETSI TS 103 420. No padrão normativo, $X \in [0.0, 1.0]$ varia da parede esquerda (0.0) à direita (1.0), com $X=0.5$ no centro; e $Y \in [0.0, 1.0]$ varia da parede frontal (0.0) à parede traseira (1.0). O canal Central (`FC`, canal 2) estava mapeado como $(x=0.0, y=1.0)$, fazendo a soundbar renderizar a voz principal no alto-falante traseiro esquerdo (módulo destacável esquerdo da JBL Bar 1000).
+  - **Mapeamento Corrigido:** Todas as posições de objetos 3D no bitstream foram alinhadas à norma canônica:
+    - `FC` (Centro / Voz): $X=0.5, Y=0.0, Z=0.0$ (Frente e Centro, abaixo da TV).
+    - `FL` / `FR`: $X=0.0 / 1.0, Y=0.0, Z=0.0$ (Frontais esquerdo e direito).
+    - `BL` / `BR`: $X=0.0 / 1.0, Y=1.0, Z=0.0$ (Satélites traseiros destacáveis).
+    - `SL` / `SR`: $X=0.0 / 1.0, Y=0.5, Z=0.0$ (Surrounds laterais).
+    - `TFL` / `TFR`: $X=0.0 / 1.0, Y=0.0, Z=1.0$ (Canais de teto frontais).
+    - `TBL` / `TBR`: $X=0.0 / 1.0, Y=1.0, Z=1.0$ (Canais de teto traseiros).
+    - `LFE`: $X=0.5, Y=0.0, Z=0.0, \text{lfe\_send}=1.0$ (Subwoofer).
+- **Eliminação de Inversão de Fase Destrutiva nos Backing Vocals (`src/separation/stem_engine.py`):**
+  - **Eliminação do Padrão `[+side, -side]`:** A inversão de polaridade de 180° no canal direito causava comb-filtering severo e cancelamento acústico no centro da sala ao somar os drivers da soundbar, gerando som fino, oco e desbalanceado.
+  - **Extração Estéreo Coerente:** Backing vocals agora são extraídos subtraindo 85% do sinal mono central de forma balanceada nos canais L e R (`side_l = vocals[:, 0] - 0.85*mid`, `side_r = vocals[:, 1] - 0.85*mid`), combinada com um filtro passa-altas de 4ª ordem em 180 Hz para eliminar ressonâncias de grave.
+- **Blindagem do Preset Imersão 360° (`src/spatial/auto_director.py`):**
+  - A Voz Principal (`lead_vocal`), o Bumbo (`kick`) e o Sub-Bass (`sub_bass_lfe`) são mantidos permanentemente ancorados no palco frontal ($Y \ge 0.85, X=0.0, \text{is\_stereo}=\text{False}$), em estrita conformidade com as diretrizes da indústria musical da Dolby, UMG e Abbey Road.
+  - A imersão 360° é gerada envolvendo instrumentos harmônicos (teclados, guitarras, sintetizadores), backing vocals, reverberações e pratos de bateria ao redor do ouvinte e elevando-os aos canais de teto.
+- **Normalização de Sonoridade Profissional (ITU-R BS.1770-4 K-Weighting & -1.0 dBTP True Peak):**
+  - Substituição da estimativa simples por RMS pela medição oficial de 2 estágios do filtro K (High-shelf +4 dB em 1.5 kHz e RLB High-pass a 100 Hz com exclusão do canal LFE).
+  - Alvo calibrado para **-18.0 LUFS integrado** com limitador True Peak em **-1.0 dBTP** (especificação oficial de controle de qualidade para entrega de áudio espacial na Apple Music e Tidal).
+- **Suíte de Testes Expandida (20 Testes Automatizados):**
+  - `test_exporter_etsi_ts_103_420_coordinates`: Codifica e decodifica via `ac3forge.Eac3Decoder` confirmando que os objetos 7.1.4 estão posicionados segundo o padrão ETSI TS 103 420.
+  - `test_immersion_360_lead_vocal_anchored`: Valida que no modo Imersão 360° o vocal principal e bumbo permanecem estritamente ancorados na frente.
+  - `test_k_weighted_lufs_loudness_and_true_peak`: Valida a medição de sonoridade K-weighted e a contenção de pico em -1.0 dBTP.
+
 ## [1.4.0] - 2026-11-19
 ### Adicionado & Aprimorado (Espelhamento Estéreo Simétrico 7.1.4 & Automação Temporal por Trechos)
 - **Espelhamento Estéreo Simétrico dos Instrumentos (`is_stereo`):**

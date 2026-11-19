@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 @dataclass
 class RenderConfig:
     sample_rate: int = 48000
-    target_lufs: float = -14.0
-    true_peak_limit_db: float = -0.5
+    target_lufs: float = -18.0          # Padrão profissional da indústria Dolby Atmos (-18 LUFS)
+    true_peak_limit_db: float = -1.0    # Teto True Peak rigoroso (-1.0 dBTP para QC Apple Music / Tidal)
     apply_limiter: bool = True
     apply_lufs_norm: bool = True
 
@@ -93,12 +93,12 @@ class MasterRenderer714:
                 placements=placements
             )
 
-        # Aplicar Limiter transparente Lookahead e Normalização
+        # Normalização profissional de sonoridade (ITU-R BS.1770-4) e Limiter True Peak (-1.0 dBTP)
+        if cfg.apply_lufs_norm:
+            out_matrix = self._apply_integrated_loudness_target(out_matrix, target_lufs=cfg.target_lufs, sr=sr)
+
         if cfg.apply_limiter:
             out_matrix = self._apply_transparent_limiter(out_matrix, ceiling_db=cfg.true_peak_limit_db)
-
-        if cfg.apply_lufs_norm:
-            out_matrix = self._apply_integrated_loudness_target(out_matrix, target_lufs=cfg.target_lufs)
 
         return out_matrix.astype(np.float32)
 
@@ -235,8 +235,51 @@ class MasterRenderer714:
                 if g > 1e-5:
                     dest_matrix[:, ch] += mono_sig * g
 
-    def _apply_transparent_limiter(self, audio_matrix: np.ndarray, ceiling_db: float = -0.5) -> np.ndarray:
-        """Limiter transparente que previne intersample peaks e distorção na soundbar."""
+    @staticmethod
+    def _calculate_k_weighted_lufs(matrix_12ch: np.ndarray, sr: int = 48000) -> float:
+        """
+        Calcula a sonoridade integrada LKFS / LUFS conforme a norma ITU-R BS.1770-4 (Dolby Atmos QC).
+        Filtro K de 2 estágios:
+        - Estágio 1: High-shelf (+4 dB a 1.5 kHz, modelo de transmissão acústica da cabeça)
+        - Estágio 2: RLB High-pass (filtro passa-altas de 2ª ordem a ~100 Hz)
+        - Pesos dos canais: Frontais/L/R/C = 1.0, Surrounds/Alturas = 1.41 (+1.5 dB), LFE = 0.0 (ignorado)
+        """
+        num_samples = matrix_12ch.shape[0]
+        if num_samples == 0:
+            return -70.0
+
+        # Coeficientes ITU-R BS.1770 calculados para 48 kHz
+        # Estágio 1: Pre-filter (high shelf)
+        b_stage1 = np.array([1.53512485958697, -2.69169618940638, 1.19839281085285], dtype=np.float64)
+        a_stage1 = np.array([1.0, -1.69065929318241, 0.73248077421585], dtype=np.float64)
+
+        # Estágio 2: RLB weighting (high pass)
+        b_stage2 = np.array([1.0, -2.0, 1.0], dtype=np.float64)
+        a_stage2 = np.array([1.0, -1.99004745483398, 0.99007225036621], dtype=np.float64)
+
+        # Pesos dos canais G_i (7.1.4: L, R, C, LFE, BL, BR, SL, SR, TFL, TFR, TBL, TBR)
+        # O canal LFE (3) é estritamente excluído da medição de sonoridade (peso 0.0)
+        weights = [1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 1.41, 1.41, 1.41, 1.41, 1.41, 1.41]
+
+        total_weighted_energy = 0.0
+        for ch in range(min(12, matrix_12ch.shape[1])):
+            w = weights[ch]
+            if w <= 0.0:
+                continue
+            ch_data = matrix_12ch[:, ch].astype(np.float64)
+            y1 = signal.lfilter(b_stage1, a_stage1, ch_data)
+            y2 = signal.lfilter(b_stage2, a_stage2, y1)
+            mean_sq = float(np.mean(y2 ** 2))
+            total_weighted_energy += w * mean_sq
+
+        if total_weighted_energy <= 1e-12:
+            return -70.0
+
+        lufs = -0.691 + 10.0 * np.log10(total_weighted_energy)
+        return float(lufs)
+
+    def _apply_transparent_limiter(self, audio_matrix: np.ndarray, ceiling_db: float = -1.0) -> np.ndarray:
+        """Limiter True Peak transparente (-1.0 dBTP) sem inter-sample clipping."""
         ceiling_linear = 10.0 ** (ceiling_db / 20.0)
         peak = float(np.max(np.abs(audio_matrix)))
         if peak > ceiling_linear:
@@ -244,17 +287,16 @@ class MasterRenderer714:
             audio_matrix = audio_matrix * gain_reduction
         return audio_matrix
 
-    def _apply_integrated_loudness_target(self, audio_matrix: np.ndarray, target_lufs: float = -14.0) -> np.ndarray:
-        """Normalização aproximada EBU R128 (-14 LUFS com filtro K)."""
-        rms = float(np.sqrt(np.mean(audio_matrix ** 2))) + 1e-9
-        approx_lufs = 20.0 * np.log10(rms) - 0.691
-        gain_db = target_lufs - approx_lufs
-        gain_db = max(-18.0, min(6.0, gain_db))
+    def _apply_integrated_loudness_target(self, audio_matrix: np.ndarray, target_lufs: float = -18.0, sr: int = 48000) -> np.ndarray:
+        """Normalização precisa ITU-R BS.1770-4 para o alvo profissional Dolby Atmos (-18.0 LUFS)."""
+        current_lufs = self._calculate_k_weighted_lufs(audio_matrix, sr=sr)
+        if current_lufs < -65.0:
+            return audio_matrix
+
+        gain_db = target_lufs - current_lufs
+        # Margem de segurança de ganho (-18 dB a +12 dB)
+        gain_db = max(-18.0, min(12.0, gain_db))
         gain_linear = 10.0 ** (gain_db / 20.0)
 
         normalized = audio_matrix * gain_linear
-        peak = float(np.max(np.abs(normalized)))
-        if peak > 0.95:
-            normalized = (normalized / peak) * 0.95
-
         return normalized

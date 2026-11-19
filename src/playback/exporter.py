@@ -87,23 +87,24 @@ class AudioExporter714:
         spf = ac3forge.SAMPLES_PER_FRAME
         num_samples = matrix_12ch.shape[0]
 
-        # Mapeamento tridimensional exato dos 12 canais no espaço físico 7.1.4:
-        # X: -1.0 (esquerda) a +1.0 (direita)
-        # Y: -1.0 (traseiro) a +1.0 (frontal)
-        # Z: 0.0 (piso/ouvido) a 1.0 (teto / overhead)
+        # Mapeamento tridimensional exato dos 12 canais conforme o padrão ETSI TS 103 420 (§4.2.1)
+        # (Room-anchored Cartesian coordinate system para Dolby Atmos / E-AC-3 JOC):
+        # X: 0.0 (Parede Esquerda) | 0.5 (Centro) | 1.0 (Parede Direita)
+        # Y: 0.0 (Parede Frontal / TV) | 0.5 (Laterais/Ouvinte) | 1.0 (Parede Traseira)
+        # Z: -1.0 (Chão) | 0.0 (Plano do Ouvido / Ear Level) | 1.0 (Teto / Overhead)
         placements = [
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=-1.0, y=1.0, z=0.0), gain=1.0, lfe_send=0.0),   # 0: FL (Frontal Esquerdo)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=1.0, z=0.0), gain=1.0, lfe_send=0.0),    # 1: FR (Frontal Direito)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=1.0, z=0.0), gain=1.0, lfe_send=0.0),    # 2: FC (Centro)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=1.0, z=0.0), gain=1.0, lfe_send=1.0),    # 3: LFE (Subwoofer / Grave < 80Hz)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=-1.0, y=-1.0, z=0.0), gain=1.0, lfe_send=0.0),  # 4: BL (Traseiro Esquerdo)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=-1.0, z=0.0), gain=1.0, lfe_send=0.0),   # 5: BR (Traseiro Direito)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=-1.0, y=0.0, z=0.0), gain=1.0, lfe_send=0.0),   # 6: SL (Lateral Esquerdo)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=0.0, z=0.0), gain=1.0, lfe_send=0.0),    # 7: SR (Lateral Direito)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=-1.0, y=1.0, z=1.0), gain=1.0, lfe_send=0.0),   # 8: TFL (Teto Frontal Esquerdo)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=1.0, z=1.0), gain=1.0, lfe_send=0.0),    # 9: TFR (Teto Frontal Direito)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=-1.0, y=-1.0, z=1.0), gain=1.0, lfe_send=0.0),  # 10: TBL (Teto Traseiro Esquerdo)
-            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=-1.0, z=1.0), gain=1.0, lfe_send=0.0),   # 11: TBR (Teto Traseiro Direito)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=0.0, z=0.0), gain=1.0, lfe_send=0.0),   # 0: FL (Frontal Esquerdo)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=0.0, z=0.0), gain=1.0, lfe_send=0.0),   # 1: FR (Frontal Direito)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.5, y=0.0, z=0.0), gain=1.0, lfe_send=0.0),   # 2: FC (Frontal Central - Voz ancorada na frente!)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.5, y=0.0, z=0.0), gain=1.0, lfe_send=1.0),   # 3: LFE (Subwoofer / Graves < 80Hz)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=1.0, z=0.0), gain=1.0, lfe_send=0.0),   # 4: BL (Traseiro Esquerdo - Módulo destacável esq.)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=1.0, z=0.0), gain=1.0, lfe_send=0.0),   # 5: BR (Traseiro Direito - Módulo destacável dir.)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=0.5, z=0.0), gain=1.0, lfe_send=0.0),   # 6: SL (Surround Lateral Esquerdo)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=0.5, z=0.0), gain=1.0, lfe_send=0.0),   # 7: SR (Surround Lateral Direito)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=0.0, z=1.0), gain=1.0, lfe_send=0.0),   # 8: TFL (Teto Frontal Esquerdo)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=0.0, z=1.0), gain=1.0, lfe_send=0.0),   # 9: TFR (Teto Frontal Direito)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=0.0, y=1.0, z=1.0), gain=1.0, lfe_send=0.0),   # 10: TBL (Teto Traseiro Esquerdo)
+            ac3forge.ObjectPlacement(position=ac3forge.Position(x=1.0, y=1.0, z=1.0), gain=1.0, lfe_send=0.0),   # 11: TBR (Teto Traseiro Direito)
         ]
 
         with open(out_ec3, "wb") as f_out:
