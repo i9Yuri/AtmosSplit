@@ -1,0 +1,104 @@
+"""
+AtmosSplit — Motor de Pan 3D VBAP para Sala 7.1.4
+Calcula ganhos dos 12 alto-falantes com conservação estrita de potência constante (L2 norm).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+import numpy as np
+
+
+@dataclass
+class SpeakerPosition714:
+    channel_index: int
+    code: str
+    name: str
+    x: float  # -1 (Esquerda) a +1 (Direita)
+    y: float  # -1 (Traseira) a +1 (Frente)
+    z: float  #  0 (Chão) a +1 (Teto)
+    is_lfe: bool = False
+
+
+# Coordenadas físicas do layout 7.1.4 da JBL Bar 1000MK2
+SPEAKER_COORDINATES_714: List[SpeakerPosition714] = [
+    SpeakerPosition714(0,  "FL",  "Frontal Esquerdo",        -0.70,  1.00, 0.00),
+    SpeakerPosition714(1,  "FR",  "Frontal Direito",          0.70,  1.00, 0.00),
+    SpeakerPosition714(2,  "FC",  "Frontal Central",          0.00,  1.00, 0.00),
+    SpeakerPosition714(3,  "LFE", "Subwoofer (LFE)",          0.00,  1.00, 0.00, is_lfe=True),
+    SpeakerPosition714(4,  "BL",  "Traseiro Esquerdo",       -0.70, -1.00, 0.00),
+    SpeakerPosition714(5,  "BR",  "Traseiro Direito",         0.70, -1.00, 0.00),
+    SpeakerPosition714(6,  "SL",  "Lateral Esquerdo",        -1.00,  0.00, 0.00),
+    SpeakerPosition714(7,  "SR",  "Lateral Direito",          1.00,  0.00, 0.00),
+    SpeakerPosition714(8,  "TFL", "Teto Frontal Esquerdo",   -0.60,  0.60, 1.00),
+    SpeakerPosition714(9,  "TFR", "Teto Frontal Direito",    0.60,  0.60, 1.00),
+    SpeakerPosition714(10, "TBL", "Teto Traseiro Esquerdo",  -0.60, -0.60, 1.00),
+    SpeakerPosition714(11, "TBR", "Teto Traseiro Direito",   0.60, -0.60, 1.00),
+]
+
+
+class VBAP714Engine:
+    def __init__(self, speakers: Optional[List[SpeakerPosition714]] = None):
+        self.speakers = speakers or SPEAKER_COORDINATES_714
+        self.spatial_speakers = [s for s in self.speakers if not s.is_lfe]
+        self.lfe_speaker = next(s for s in self.speakers if s.is_lfe)
+
+    def calculate_gains(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        spread: float = 0.2,
+        lfe_send: float = 0.0
+    ) -> np.ndarray:
+        """
+        Calcula o vetor de ganhos [12] para um som localizado em (x, y, z).
+        - x in [-1.0, 1.0] (Esquerda / Direita)
+        - y in [-1.0, 1.0] (Atrás / Frente)
+        - z in [ 0.0, 1.0] (Chão / Teto)
+        - spread in [0.0, 1.0] (0 = pontual preciso, 1 = ambiente difuso)
+        - lfe_send in [0.0, 1.0] (envio direto ao canal de subwoofer)
+        """
+        # Limitar valores ao domínio válido
+        x = max(-1.0, min(1.0, float(x)))
+        y = max(-1.0, min(1.0, float(y)))
+        z = max(0.0, min(1.0, float(z)))
+        spread = max(0.0, min(1.0, float(spread)))
+        lfe_send = max(0.0, min(1.0, float(lfe_send)))
+
+        gains = np.zeros(12, dtype=np.float32)
+
+        # 1. Distância euclidiana 3D para cada alto-falante espacial
+        pos_target = np.array([x, y, z], dtype=np.float32)
+        raw_weights = []
+
+        # Expoente de diretividade: spread alto achata os pesos, spread baixo aguça
+        p = 2.0 / (0.2 + 0.8 * spread)
+
+        for spk in self.spatial_speakers:
+            spk_pos = np.array([spk.x, spk.y, spk.z], dtype=np.float32)
+            dist = np.linalg.norm(pos_target - spk_pos)
+            # Evitar divisão por zero se estiver exatamente sobre a caixa
+            inv_dist = 1.0 / (dist + 0.08) ** p
+            raw_weights.append(inv_dist)
+
+        raw_weights = np.array(raw_weights, dtype=np.float32)
+
+        # 2. Conservação estrita de Potência Constante (L2 norm)
+        # sum(g_i^2) = 1.0
+        norm_factor = np.linalg.norm(raw_weights)
+        if norm_factor > 1e-6:
+            spatial_gains = raw_weights / norm_factor
+        else:
+            spatial_gains = np.ones_like(raw_weights) / np.sqrt(len(raw_weights))
+
+        for spk, gain in zip(self.spatial_speakers, spatial_gains):
+            gains[spk.channel_index] = gain
+
+        # 3. Canal LFE (Subwoofer)
+        gains[self.lfe_speaker.channel_index] = lfe_send
+
+        return gains

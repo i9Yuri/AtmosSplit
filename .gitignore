@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Temporary and Large Audio/Video Artifacts
+*.wav
+*.mkv
+*.mp4
+*.ec3
+*.flac
+*.mka
+tests/multichannel_diagnostics/*.wav
+tests/multichannel_diagnostics/*.mkv
+tests/multichannel_diagnostics/*.mka
+tests/benchmark_data/*.wav
+tests/benchmark_data/demucs_out/
+
+# OS and Editor
+.directory
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Knowledge Graph temporary runs (keep report and graph if desired, ignore local cache)
+graphify-out/cache/

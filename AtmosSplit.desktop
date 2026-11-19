@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AtmosSplit
+GenericName=Montador Espacial Dolby Atmos 7.1.4
+Comment=Destrinchador musical com IA e montagem espacial 7.1.4 para JBL Bar 1000
+Exec=/home/yuri/Desktop/Yuri/Projects/AtmosSplit/iniciar.sh %F
+Path=/home/yuri/Desktop/Yuri/Projects/AtmosSplit
+Icon=/home/yuri/Desktop/Yuri/Projects/AtmosSplit/assets/icon.png
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;Player;
+MimeType=audio/flac;audio/x-wav;audio/mp4;audio/mpeg;audio/ogg;
+Keywords=Dolby;Atmos;7.1.4;Stems;Demucs;JBL;Spatial;
+StartupNotify=true
+StartupWMClass=AtmosSplit
