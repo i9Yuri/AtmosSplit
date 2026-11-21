@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import copy
 import uuid
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from math import isfinite
+from typing import Dict, List, Optional
 
-import numpy as np
 
 from .auto_director import SpatialPlacement
+from .mix_engine import transition_half_width
+from .micro_events import SpatialEvent
 
 
 @dataclass
@@ -26,8 +28,15 @@ class SpatialSection:
     end_time_s: float                   # Fim do trecho em segundos
     placements: Dict[str, SpatialPlacement]  # Cópia independente do posicionamento 3D dos stems
     color_hex: str = "#00E5FF"          # Cor temática do bloco visual
-    cached_gains_l: Dict[str, np.ndarray] = field(default_factory=dict)
-    cached_gains_r: Dict[str, np.ndarray] = field(default_factory=dict)
+    section_type: str = "manual"
+    family: str = ""
+    confidence: float = 0.
+    description: str = ""
+    tempo_bpm: float = 0.
+    beats_per_bar: int = 0
+    downbeats_s: tuple[float, ...] = ()
+    micro_events: tuple[SpatialEvent, ...] = ()
+    micro_enabled: bool = True
 
 
 class SpatialTimelineManager:
@@ -47,7 +56,7 @@ class SpatialTimelineManager:
     ]
 
     def __init__(self, total_duration_s: float = 180.0, initial_placements: Optional[Dict[str, SpatialPlacement]] = None):
-        self.total_duration_s = max(1.0, float(total_duration_s))
+        self.total_duration_s = max(1e-6, float(total_duration_s))
         self.sections: List[SpatialSection] = []
         self.active_edit_section_id: Optional[str] = None
         self._color_index = 0
@@ -63,7 +72,7 @@ class SpatialTimelineManager:
 
     def reset_to_single_section(self, total_duration_s: float, initial_placements: Dict[str, SpatialPlacement]):
         """Reinicia a timeline com uma única seção cobrindo toda a faixa."""
-        self.total_duration_s = max(1.0, float(total_duration_s))
+        self.total_duration_s = max(1e-6, float(total_duration_s))
         sec_id = f"sec_{uuid.uuid4().hex[:6]}"
         self._color_index = 0
         first_section = SpatialSection(
@@ -79,62 +88,35 @@ class SpatialTimelineManager:
 
     def set_duration(self, new_duration_s: float):
         """Atualiza a duração total mantendo proporções das seções existentes."""
-        new_d = max(1.0, float(new_duration_s))
-        if not self.sections or abs(new_d - self.total_duration_s) < 0.1:
-            self.total_duration_s = new_d
-            return
-
+        new_d = max(1e-6, float(new_duration_s))
         ratio = new_d / self.total_duration_s
-        for sec in self.sections:
-            sec.start_time_s = round(sec.start_time_s * ratio, 2)
-            sec.end_time_s = round(sec.end_time_s * ratio, 2)
-
-        # Assegurar que o último termine exatamente no total
-        self.sections[0].start_time_s = 0.0
+        for section in self.sections:
+            section.start_time_s *= ratio
+            section.end_time_s *= ratio
+            section.downbeats_s = tuple(t * ratio for t in section.downbeats_s)
+            section.tempo_bpm /= ratio
+            section.micro_events = tuple(replace(e, start_s=e.start_s*ratio, end_s=e.end_s*ratio,
+                                       attack_s=e.attack_s*ratio, release_s=e.release_s*ratio) for e in section.micro_events)
         self.sections[-1].end_time_s = new_d
         self.total_duration_s = new_d
 
     def split_section_at(self, split_time_s: float, new_name: Optional[str] = None) -> Optional[SpatialSection]:
-        """
-        Divide a seção que contém split_time_s em duas seções contíguas.
-        A nova seção herda uma cópia do posicionamento para fácil ajuste pelo usuário.
-        """
-        t = max(0.001, min(self.total_duration_s - 0.001, round(float(split_time_s), 3)))
-
-        # Localizar a seção alvo
-        target_idx = -1
-        for idx, sec in enumerate(self.sections):
-            if sec.start_time_s + 0.001 <= t <= sec.end_time_s - 0.001:
-                target_idx = idx
-                break
-
-        if target_idx == -1:
-            return None  # Ponto muito próximo da borda existente
-
-        orig_sec = self.sections[target_idx]
-        orig_end = orig_sec.end_time_s
-
-        # Reduz a seção original
-        orig_sec.end_time_s = round(t, 3)
-
-        # Cria a nova seção
-        num_sections = len(self.sections) + 1
-        name = new_name or f"Trecho {num_sections}"
-        new_id = f"sec_{uuid.uuid4().hex[:6]}"
-        new_sec = SpatialSection(
-            id=new_id,
-            name=name,
-            start_time_s=round(t, 3),
-            end_time_s=orig_end,
-            placements=copy.deepcopy(orig_sec.placements),
-            color_hex=self._next_color(),
-            cached_gains_l={k: np.copy(v) for k, v in orig_sec.cached_gains_l.items()},
-            cached_gains_r={k: np.copy(v) for k, v in orig_sec.cached_gains_r.items()}
-        )
-
-        self.sections.insert(target_idx + 1, new_sec)
-        self.active_edit_section_id = new_id
-        return new_sec
+        """Divide o arranjo sem perder a família MIR, a grade ou a precisão temporal."""
+        t = float(split_time_s)
+        for index, section in enumerate(self.sections):
+            if section.start_time_s + .001 <= t <= section.end_time_s - .001:
+                new = replace(
+                    section, id=f"sec_{uuid.uuid4().hex[:12]}", name=new_name or f"Trecho {len(self.sections)+1}",
+                    start_time_s=t, placements=copy.deepcopy(section.placements), color_hex=self._next_color(),
+                    downbeats_s=tuple(bar for bar in section.downbeats_s if bar >= t))
+                section.downbeats_s = tuple(bar for bar in section.downbeats_s if bar < t)
+                new.micro_events = tuple(e for e in section.micro_events if e.start_s >= t)
+                section.micro_events = tuple(e for e in section.micro_events if e.start_s < t)
+                section.end_time_s = t
+                self.sections.insert(index + 1, new)
+                self.active_edit_section_id = new.id
+                return new
+        return None
 
     def adjust_boundary(self, boundary_idx: int, new_time_s: float) -> bool:
         """
@@ -153,7 +135,15 @@ class SpatialTimelineManager:
         if min_t >= max_t:
             return False
 
-        clamped_t = round(max(min_t, min(max_t, float(new_time_s))), 3)
+        if not isfinite(new_time_s):
+            return False
+        clamped_t = max(min_t, min(max_t, float(new_time_s)))
+        bars = sec_left.downbeats_s + sec_right.downbeats_s
+        sec_left.downbeats_s = tuple(t for t in bars if t < clamped_t)
+        sec_right.downbeats_s = tuple(t for t in bars if t >= clamped_t)
+        events = sec_left.micro_events + sec_right.micro_events
+        sec_left.micro_events = tuple(e for e in events if e.start_s < clamped_t)
+        sec_right.micro_events = tuple(e for e in events if e.start_s >= clamped_t)
         sec_left.end_time_s = clamped_t
         sec_right.start_time_s = clamped_t
         return True
@@ -162,7 +152,15 @@ class SpatialTimelineManager:
         """Define uma nova lista completa de seções gerada pelo Atmos Maestro."""
         if not new_sections:
             return
-        self.sections = new_sections
+        cursor = 0.
+        identifiers = set()
+        for section in new_sections:
+            if (not isfinite(section.end_time_s) or section.start_time_s != cursor
+                    or section.end_time_s <= cursor or section.id in identifiers):
+                raise ValueError("As seções devem ser contíguas, ter duração positiva e IDs distintos.")
+            identifiers.add(section.id)
+            cursor = section.end_time_s
+        self.sections = list(new_sections)
         self.active_edit_section_id = new_sections[0].id
         self.total_duration_s = new_sections[-1].end_time_s
 
@@ -189,6 +187,9 @@ class SpatialTimelineManager:
             self.sections[0].start_time_s = 0.0
             self.active_edit_section_id = self.sections[0].id
 
+        neighbor = self.get_active_edit_section()
+        neighbor.micro_events = tuple(sorted(neighbor.micro_events+removed_sec.micro_events, key=lambda e: e.start_s))
+        neighbor.downbeats_s = tuple(sorted(set(neighbor.downbeats_s + removed_sec.downbeats_s)))
         return True
 
     def rename_section(self, section_id: str, new_name: str) -> bool:
@@ -210,109 +211,47 @@ class SpatialTimelineManager:
         """Retorna a seção ativa no tempo time_s."""
         t = max(0.0, min(self.total_duration_s, float(time_s)))
         for sec in self.sections:
-            if sec.start_time_s <= t <= sec.end_time_s:
+            if sec.start_time_s <= t < sec.end_time_s:
                 return sec
         return self.sections[-1]
 
-    def recalculate_section_gains(self, vbap_engine):
-        """Pré-calcula os vetores de 12 ganhos VBAP de todas as seções (Zero custo no callback de áudio)."""
-        import numpy as np
-        for sec in self.sections:
-            sec.cached_gains_l.clear()
-            sec.cached_gains_r.clear()
-            for stem_name, plc in sec.placements.items():
-                if plc.is_muted or plc.volume_gain <= 0.0:
-                    gl = np.zeros(12, dtype=np.float32)
-                    gr = np.zeros(12, dtype=np.float32)
-                elif plc.is_stereo:
-                    dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-                    gl = np.asarray(vbap_engine.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32) * float(plc.volume_gain)
-                    gr = np.asarray(vbap_engine.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32) * float(plc.volume_gain)
-                else:
-                    gl = np.asarray(vbap_engine.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32) * float(plc.volume_gain)
-                    gr = gl
-                sec.cached_gains_l[stem_name] = gl
-                sec.cached_gains_r[stem_name] = gr
+    def get_interpolated_placements(self, time_s: float, crossfade_window_s: float | None = None) -> Dict[str, SpatialPlacement]:
+        left, right, weight = self._scene_pair(time_s, crossfade_window_s)
+        poses = (self._interpolate_placement_dicts(left.placements, right.placements, weight)
+                 if right else left.placements)
+        scenes = [(left, 1.-weight)] if right is None else [(left, 1.-weight), (right, weight)]
+        def send_gain(name: str) -> float:
+            gain = 0.
+            for scene, fraction in scenes:
+                source = scene.placements.get(name)
+                if scene.micro_enabled and source and not source.is_muted:
+                    if source.is_solo or not any(p.is_solo for p in scene.placements.values()):
+                        gain += source.volume_gain*fraction
+            return gain
 
-    def get_interpolated_gains_at_time(
-        self,
-        time_s: float,
-        stem_name: str,
-        crossfade_window_s: float = 1.0
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        Retorna os vetores de ganhos (L e R) interpolados suavemente por crossfade vetorial direto.
-        Zero cálculo trigonométrico em tempo real: pura soma e multiplicação de vetores (12 floats).
-        """
-        import numpy as np
-        sections = list(self.sections)
-        if not sections:
-            return None, None
+        for section in self.sections:
+            if not section.micro_enabled or section.start_time_s > time_s:
+                continue
+            for ev in section.micro_events:
+                if not ev.audible or not ev.start_s <= time_s < ev.end_s:
+                    continue
+                strength = float(ev.envelope(time_s))*send_gain(ev.stem)
+                if strength <= 0:
+                    continue
+                pose = ev.pose(float(ev.progress(time_s)))
+                pose.volume_gain *= strength
+                pose.lfe_send *= strength
+                poses = {**poses, pose.stem_name: pose}
+        return poses
 
-        if len(sections) == 1:
-            sec = sections[0]
-            return sec.cached_gains_l.get(stem_name), sec.cached_gains_r.get(stem_name)
-
-        t = max(0.0, min(self.total_duration_s, float(time_s)))
-        half_w = max(0.05, crossfade_window_s / 2.0)
-        zeros_gain = np.zeros(12, dtype=np.float32)
-
-        for idx in range(len(sections) - 1):
-            sec_a = sections[idx]
-            sec_b = sections[idx + 1]
-            boundary = sec_b.start_time_s
-
-            if (boundary - half_w) <= t <= (boundary + half_w):
-                raw_alpha = (t - (boundary - half_w)) / (2.0 * half_w)
-                raw_alpha = max(0.0, min(1.0, raw_alpha))
-                alpha = raw_alpha * raw_alpha * (3.0 - 2.0 * raw_alpha)
-                inv_alpha = 1.0 - alpha
-
-                gl_a = sec_a.cached_gains_l.get(stem_name, zeros_gain)
-                gl_b = sec_b.cached_gains_l.get(stem_name, zeros_gain)
-                gr_a = sec_a.cached_gains_r.get(stem_name, zeros_gain)
-                gr_b = sec_b.cached_gains_r.get(stem_name, zeros_gain)
-
-                interp_gl = inv_alpha * gl_a + alpha * gl_b
-                interp_gr = inv_alpha * gr_a + alpha * gr_b
-
-                return interp_gl, interp_gr
-
-        active_sec = self.get_section_at_time(t)
-        return active_sec.cached_gains_l.get(stem_name, zeros_gain), active_sec.cached_gains_r.get(stem_name, zeros_gain)
-
-    def get_interpolated_placements(
-        self,
-        time_s: float,
-        crossfade_window_s: float = 1.0
-    ) -> Dict[str, SpatialPlacement]:
-        """
-        Retorna as coordenadas e ganhos dos stems para o tempo time_s.
-        Quando próximo à fronteira B entre duas seções, realiza uma interpolação suave (smoothstep)
-        na janela [B - W/2, B + W/2], garantindo movimentação espacial orgânica, fluida e contínua
-        sem saltos bruscos ou descontinuidades acústicas.
-        """
-        if len(self.sections) <= 1:
-            return self.sections[0].placements
-
-        t = max(0.0, min(self.total_duration_s, float(time_s)))
-        half_w = max(0.05, crossfade_window_s / 2.0)
-
-        # Verificar se está na janela de transição de alguma fronteira entre seções
-        for idx in range(len(self.sections) - 1):
-            sec_a = self.sections[idx]
-            sec_b = self.sections[idx + 1]
-            boundary = sec_b.start_time_s
-
-            if (boundary - half_w) <= t <= (boundary + half_w):
-                raw_alpha = (t - (boundary - half_w)) / (2.0 * half_w)
-                raw_alpha = max(0.0, min(1.0, raw_alpha))
-                # Curva Hermite / Smoothstep S-Curve: 3a^2 - 2a^3
-                alpha = raw_alpha * raw_alpha * (3.0 - 2.0 * raw_alpha)
-                return self._interpolate_placement_dicts(sec_a.placements, sec_b.placements, alpha)
-
-        # Se não estiver em transição de fronteira, retorna a seção estacionária ativa
-        return self.get_section_at_time(t).placements
+    def _scene_pair(self, seconds: float, window: float | None) -> tuple[SpatialSection, SpatialSection | None, float]:
+        for left, right in zip(self.sections, self.sections[1:]):
+            half = transition_half_width(left, right, window)
+            distance = seconds-right.start_time_s
+            if half > 0 and -half <= distance <= half:
+                t = (distance+half)/(2*half)
+                return left, right, t*t*(3-2*t)
+        return self.get_section_at_time(seconds), None, 0.
 
     @staticmethod
     def _interpolate_placement_dicts(
@@ -348,7 +287,9 @@ class SpatialTimelineManager:
                 result[k] = interp_plc
             elif p_a:
                 result[k] = copy.copy(p_a)
+                result[k].volume_gain *= inv_alpha
             elif p_b:
                 result[k] = copy.copy(p_b)
+                result[k].volume_gain *= alpha
 
         return result

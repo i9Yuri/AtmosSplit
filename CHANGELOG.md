@@ -2,6 +2,32 @@
 
 Todas as mudanças notáveis deste projeto serão registradas neste arquivo.
 
+## [2.1.0] - 2026-11-20
+
+### Repaginação Visual de Alta Fidelidade (AMOLED / Claro) e Feedback Dinâmico de Separação
+- **Design de Alta Fidelidade com Temas AMOLED e Claro (Zero Cores de Fundo Artificiais):**
+  - Erradicação de paletas verdes e fundos com saturações indesejadas.
+  - Dois modos monocromáticos puros de estúdio de alta fidelidade:
+    - **Escuro AMOLED:** Fundo preto absoluto (`#000000`), painéis em grafite (`#0B0B0D`), linhas de contraste sutil (`#28282D`) e tipografia nítida em branco (`#FFFFFF`).
+    - **Claro de Estúdio:** Papel/zinco limpo (`#F4F4F6`), painéis brancos (`#FFFFFF`), divisores suaves (`#D1D5DB`) e tinta escura (`#09090B`).
+  - Botão discreto de alternância no cabeçalho superior (`☀️ Claro` / `🌙 AMOLED`) e ação no menu da sessão, com persistência automática no `QSettings("ui/theme")`.
+  - Atualização dinâmica e instantânea em tempo real de toda a interface, Sala 7.1.4, timeline e marcadores de microeventos.
+- **Resolução do Carregamento Infinito (Demucs Chunk Callback & CPU Optimization):**
+  - Implementação de callback dinâmico trecho a trecho (`callback=on_chunk`) na inferência neural em CPU com HTDemucs, fornecendo porcentagem contínua (ex.: 25% → 70%) e tempo restante estimado (ETA) a cada 4–6 segundos.
+  - Configuração de `shifts=0` por padrão em CPU, eliminando reprocessamento duplicado desnecessário e reduzindo o tempo de separação pela metade sem degradação acústica perceptível.
+  - Interrupção cooperativa imediata via `cancel_check()` ao clicar em Cancelar, cancelando a execução do pool Demucs instantaneamente.
+  - Alerta amigável no drag-and-drop quando uma operação já estiver em andamento (`BUSY_DROP_NOTICE`).
+  - Barra de progresso `StudioProgressBar` de alta visibilidade com texto percentual em alto contraste.
+
+
+## [2.0.0] - 2026-11-20
+
+- Estúdio com fontes, sala, inspetor, transporte, direção, microeventos e calibração. A sessão guarda as edições por faixa e modo. O cancelamento encerra a árvore do processo de trabalho.
+- Detecção de métrica por acentos, novidade multiescala e famílias recorrentes. A camada de eventos acústicos identifica repetições vocais, respostas, notas de clímax, viradas, pratos e acentos de graves com passo de 5 ms.
+- Plano de mixagem compartilhado entre pré-escuta e master. Subdivisão aditiva, voz ancorada em FC, compensação estéreo, mascaramento por presença e relatório de balanço vocal.
+- Callback C11 independente do GIL, buffers pré-alocados, seek atômico e drenagem no fim da reprodução. Compilação local para x86-64 básico.
+- Empacotamento JOC de onze objetos e LFE dedicado, validação por decodificação, preservação da cauda do transform e MP4 com início rápido. Novo arquivo de identificação dos canais gerado pela mesma cadeia da entrega.
+
 ## [1.8.2] - 2026-11-19
 ### Adicionado & Aprimorado (Animação 3D em Tempo Real da Sala 7.1.4, Inteligência Cirúrgica de 9 Camadas e Vocal Throw Desbloqueado)
 - **Pré-visualização Tridimensional em Tempo Real na Sala 7.1.4 (`RoomView714`):**

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import List, Optional
 
 import numpy as np
 
@@ -44,6 +44,8 @@ class VBAP714Engine:
     def __init__(self, speakers: Optional[List[SpeakerPosition714]] = None):
         self.speakers = speakers or SPEAKER_COORDINATES_714
         self.spatial_speakers = [s for s in self.speakers if not s.is_lfe]
+        self._xyz = np.array([(s.x, s.y, s.z) for s in self.spatial_speakers])
+        self._indices = [s.channel_index for s in self.spatial_speakers]
         self.lfe_speaker = next(s for s in self.speakers if s.is_lfe)
 
     def calculate_gains(
@@ -73,30 +75,10 @@ class VBAP714Engine:
 
         # 1. Distância euclidiana 3D para cada alto-falante espacial
         pos_target = np.array([x, y, z], dtype=np.float32)
-        raw_weights = []
-
-        # Expoente de diretividade: spread alto achata os pesos, spread baixo aguça
-        p = 2.0 / (0.2 + 0.8 * spread)
-
-        for spk in self.spatial_speakers:
-            spk_pos = np.array([spk.x, spk.y, spk.z], dtype=np.float32)
-            dist = np.linalg.norm(pos_target - spk_pos)
-            # Evitar divisão por zero se estiver exatamente sobre a caixa
-            inv_dist = 1.0 / (dist + 0.08) ** p
-            raw_weights.append(inv_dist)
-
-        raw_weights = np.array(raw_weights, dtype=np.float32)
-
-        # 2. Conservação estrita de Potência Constante (L2 norm)
-        # sum(g_i^2) = 1.0
-        norm_factor = np.linalg.norm(raw_weights)
-        if norm_factor > 1e-6:
-            spatial_gains = raw_weights / norm_factor
-        else:
-            spatial_gains = np.ones_like(raw_weights) / np.sqrt(len(raw_weights))
-
-        for spk, gain in zip(self.spatial_speakers, spatial_gains):
-            gains[spk.channel_index] = gain
+        exponent = 2.0 / (0.2 + 0.8*spread)
+        distances = np.linalg.norm(self._xyz - pos_target, axis=1) + .08
+        weights = (distances.min()/distances)**exponent
+        gains[self._indices] = weights/np.linalg.norm(weights)
 
         # 3. Canal LFE (Subwoofer)
         gains[self.lfe_speaker.channel_index] = lfe_send

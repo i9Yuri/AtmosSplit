@@ -17,9 +17,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from src.acquisition.file_source import load_audio_file
 from src.separation.process_shield import apply_process_shield
-from src.separation.stem_engine import DeepStemEngine
 
 
 def emit_json(event_type: str, **kwargs):
@@ -37,6 +35,8 @@ def main():
 
     # 1. Blindagem de Processo e Afinidade de CPU
     apply_process_shield(reserve_cores=2)
+    from src.acquisition.file_source import load_audio_file
+    from src.separation.stem_engine import DeepStemEngine
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -50,6 +50,8 @@ def main():
             emit_json("error", message="Não foi possível decodificar dados de áudio.")
             sys.exit(1)
 
+        if source.sha256_hash != args.hash:
+            raise ValueError("O arquivo de origem mudou desde a abertura.")
         engine = DeepStemEngine()
 
         def progress_cb(pct: float, msg: str):

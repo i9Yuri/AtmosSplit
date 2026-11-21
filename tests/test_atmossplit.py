@@ -247,7 +247,7 @@ def test_live_spatial_player():
 
     player.set_stems_and_placements([stem], placements)
     assert player.total_duration_s == pytest.approx(2.0, rel=1e-2)
-    assert "lead_vocal" in player._cached_vbap_gains
+    assert player._dsp_state.plan.sources[0].name == "lead_vocal"
 
     # Testar snapshot atômico
     cur_s, tot_s, vu_stems, sub_vu, is_p = player.get_ui_snapshot()
@@ -565,7 +565,7 @@ def test_room_view_stereo_pucks_and_toggle():
 def test_exporter_etsi_ts_103_420_coordinates(tmp_path: Path):
     """
     Valida que a codificação Dolby Atmos E-AC-3 JOC via ac3forge segue estritamente
-    a norma ETSI TS 103 420 (§4.2.1) para os 12 canais 7.1.4:
+    a norma ETSI TS 103 420 (§4.2.1) para 11 objetos e LFE no bed:
     - X: 0.0 (Esq), 0.5 (Centro), 1.0 (Dir)
     - Y: 0.0 (Frente / TV), 0.5 (Laterais/Ouvinte), 1.0 (Traseira)
     - Z: 0.0 (Ouvido), 1.0 (Teto)
@@ -580,7 +580,7 @@ def test_exporter_etsi_ts_103_420_coordinates(tmp_path: Path):
     matrix_12ch[:, 2] = np.sin(2 * np.pi * 1000 * np.linspace(0, 0.032, spf)) * 0.5
 
     temp_ec3 = tmp_path / "test_etsi.ec3"
-    AudioExporter714._encode_eac3_joc_stream(matrix_12ch, temp_ec3, sample_rate=sr, bitrate_kbps=768)
+    AudioExporter714.export(matrix_12ch, temp_ec3, sr, ExportFormat.EC3_ATMOS_714)
     assert temp_ec3.exists()
 
     with open(temp_ec3, "rb") as f:
@@ -591,7 +591,8 @@ def test_exporter_etsi_ts_103_420_coordinates(tmp_path: Path):
     assert unit is not None
     assert unit.object_metadata is not None
     objs = unit.object_metadata.objects
-    assert len(objs) == 12
+    assert len(objs) == 11
+    assert unit.object_metadata.program.lfe
 
     # Obj 0: Frontal Esquerdo (FL) -> x=0.0, y=0.0, z=0.0
     assert objs[0].position.x == pytest.approx(0.0, abs=0.05)
@@ -606,12 +607,12 @@ def test_exporter_etsi_ts_103_420_coordinates(tmp_path: Path):
     assert objs[2].position.x == pytest.approx(0.5, abs=0.05), "FC deve estar no centro (x=0.5)!"
     assert objs[2].position.y == pytest.approx(0.0, abs=0.05), "FC deve estar na parede frontal (y=0.0), NÃO na traseira!"
 
-    # Obj 4: Traseiro Esquerdo (BL - Módulo destacável esquerdo) -> x=0.0, y=1.0
-    assert objs[4].position.x == pytest.approx(0.0, abs=0.05)
-    assert objs[4].position.y == pytest.approx(1.0, abs=0.05)
+    # Obj 3: Traseiro Esquerdo (BL - Módulo destacável esquerdo) -> x=0.0, y=1.0
+    assert objs[3].position.x == pytest.approx(0.0, abs=0.05)
+    assert objs[3].position.y == pytest.approx(1.0, abs=0.05)
 
-    # Obj 8: Teto Frontal Esquerdo (TFL) -> x=0.0, y=0.0, z=1.0 (Teto)
-    assert objs[8].position.z == pytest.approx(1.0, abs=0.05)
+    # Obj 7: Teto Frontal Esquerdo (TFL) -> x=0.0, y=0.0, z=1.0 (Teto)
+    assert objs[7].position.z == pytest.approx(1.0, abs=0.05)
 
 
 def test_immersion_360_lead_vocal_anchored():
@@ -723,7 +724,7 @@ def test_stem_card_pan_and_quick_position_snaps():
     app.processEvents()
 
 
-def test_live_player_crash_proof_and_zero_lock_contention():
+def test_live_player_crash_proof_and_zero_lock_contention(native_output):
     """Valida que o LiveSpatialPlayer calcula ganhos fora da trava e nunca encerra o processo por exceções."""
     sr = 48000
     player = LiveSpatialPlayer(sample_rate=sr)
@@ -737,22 +738,20 @@ def test_live_player_crash_proof_and_zero_lock_contention():
         t = i / 100.0
         player.update_placement("vocals", x=float(np.sin(t)), y=float(np.cos(t)), z=0.5)
 
-    assert "vocals" in player._cached_vbap_gains_l
-    assert len(player._cached_vbap_gains_l["vocals"]) == 12
-
-    # Testar callback blindado contra falhas graves
+    state = player._dsp_state
+    assert state.plan.scenes[0].gains.shape == (1, 3, 12)
+    assert not state.plan.scenes[0].gains.flags.writeable
+    player._is_playing = True
     outdata = np.ones((512, 2), dtype=np.float32)
-    # Mesmo com estado inconsistente forçado, o callback não deve propagar exceção
-    player._current_sample = 999999999
-    player._audio_callback(outdata, 512, None, None)
-    # Callback deve zerar outdata e não falhar
-    assert np.all(outdata == 0)
+    consume = native_output(player)
+    consume(outdata)
+    assert np.all(outdata == 0) and player.underruns == 1
+    assert player.current_time_s == 0
 
 
-def test_lock_free_dsp_and_timeline_crossfade_audio_callback():
+def test_lock_free_dsp_and_timeline_crossfade_audio_callback(native_output):
     """Valida motor de áudio 100% Lock-Free e crossfade vetorial instantâneo entre seções."""
     from src.spatial.timeline_manager import SpatialTimelineManager
-    import threading
 
     sr = 48000
     player = LiveSpatialPlayer(sample_rate=sr, block_size=1024)
@@ -776,20 +775,23 @@ def test_lock_free_dsp_and_timeline_crossfade_audio_callback():
 
     player._is_playing = True
 
-    # 1. Valida que as seções possuem ganhos pré-calculados
-    assert len(mgr.sections[0].cached_gains_l) == 2
-    assert len(mgr.sections[1].cached_gains_l) == 2
+    # O ganho efetivo no centro da transição corresponde à média dos dois arranjos.
+    plan = player._dsp_state.plan
+    assert all(scene.gains.shape == (2, 3, 12) and not scene.gains.flags.writeable for scene in plan.scenes)
+    edge = 5 * sr
+    at_edge = np.empty((1, 12), dtype="f")
+    vocals = np.empty_like(at_edge)
+    plan.mix(edge, at_edge, lead_bus=vocals)
+    endpoints = [scene.gains[0, :2].sum(axis=0) * .5 for scene in plan.scenes]
+    np.testing.assert_allclose(vocals[0], np.mean(endpoints, axis=0), atol=1e-6)
 
-    # 2. Testa crossfade vetorial direto
-    gl_mid, gr_mid = mgr.get_interpolated_gains_at_time(5.0, "lead_vocal")
-    assert gl_mid is not None
-    assert len(gl_mid) == 12
-
-    # 3. Execução concorrente do callback e atualizações do mouse (sem travas / sem contenção)
+    consume = native_output(player)
+    # O snapshot do arranjo anterior continua válido depois de cada gesto.
     outdata = np.zeros((1024, 2), dtype=np.float32)
     for i in range(20):
         player.update_placement("lead_vocal", x=float(np.sin(i*0.2)), y=float(np.cos(i*0.2)), z=0.3)
-        player._audio_callback(outdata, 1024, None, None)
+        assert player._produce(player._transport, player._dsp_state, player.binaural)
+        consume(outdata)
         assert np.any(outdata != 0), "Áudio deve ser gerado continuamente sem bloqueio!"
 
     player._is_playing = False
@@ -950,7 +952,7 @@ def test_stem_card_duplicate_button_and_signal():
     card = StemControlCard(stem, plc)
 
     assert hasattr(card, "btn_clone")
-    assert card.btn_clone.text() == "➕"
+    assert card.btn_clone.accessibleName() == "Duplicar fonte"
 
     received_signals = []
     card.duplicate_requested.connect(lambda name: received_signals.append(name))
@@ -960,79 +962,22 @@ def test_stem_card_duplicate_button_and_signal():
     app.processEvents()
 
 
-def test_song_structure_intelligence_and_vocal_throw():
-    """Valida análise musical autônoma, detecção de seções e criação do vocal throw nos módulos traseiros (Last Christmas)."""
+def test_sustained_stem_entry_creates_one_boundary_and_keeps_voice_front():
     from src.spatial.song_intelligence import SongStructureIntelligence
-    from src.spatial.auto_director import DirectorPreset
-
-    sr = 48000
-    duration_s = 180.0  # 3 minutos
-    num_samples = int(duration_s * sr)
-
-    # Simular stems com dinâmicas reais
-    t = np.linspace(0, duration_s, num_samples, endpoint=False, dtype=np.float32)
-    # Vocals: ativos no meio
-    voc_signal = np.sin(2 * np.pi * 440 * t) * 0.6
-    # Drums: começam após 12 segundos (intro)
-    drums_signal = np.sin(2 * np.pi * 100 * t) * 0.7
-    drums_signal[:int(12 * sr)] = 0.0
-
-    stems = [
-        StemTrack("vocals", "Voz", "#00E5FF", np.column_stack([voc_signal, voc_signal]), sr),
-        StemTrack("drums", "Bateria", "#FF9100", np.column_stack([drums_signal, drums_signal]), sr),
-        StemTrack("bass", "Baixo", "#00E676", np.zeros((num_samples, 2), dtype=np.float32), sr),
-        StemTrack("other", "Outros", "#D500F9", np.zeros((num_samples, 2), dtype=np.float32), sr),
-    ]
-
-    sections = SongStructureIntelligence.analyze_and_arrange(stems, duration_s, DirectorPreset.BALANCED)
-    assert len(sections) >= 8, f"Música de 3 minutos deve gerar frases musicais granulares (obteve {len(sections)})"
-
-    # Verificar que os blocos são musicais e não monólitos gigantes
-    durations = [s.end_time_s - s.start_time_s for s in sections]
-    avg_dur = sum(durations) / len(durations)
-    assert 6.0 <= avg_dur <= 25.0, f"Duração média das frases deve ser musical (~8s a 20s), obteve {avg_dur:.1f}s"
-
-    # Verificar continuidade temporal estrita
-    assert sections[0].start_time_s == 0.0
-    assert abs(sections[-1].end_time_s - duration_s) < 0.1
-    for i in range(len(sections) - 1):
-        assert abs(sections[i].end_time_s - sections[i + 1].start_time_s) < 1e-4
-
-    # Verificar presença do vocal throw ('vocals::spatial_throw')
-    has_throw = any("vocals::spatial_throw" in sec.placements for sec in sections)
-    assert has_throw, "Efeito Last Christmas deve gerar instância 'vocals::spatial_throw' para módulos traseiros"
-
-    # Verificar dinâmica espacial real entre seções (não apenas volume)
-    chorus_sec = next((s for s in sections if "refrão" in s.name.lower() or "clímax" in s.name.lower()), None)
-    verse_sec = next((s for s in sections if "verso" in s.name.lower()), None)
-    buildup_sec = next((s for s in sections if "build-up" in s.name.lower() or "ascensão" in s.name.lower()), None)
-
-    if verse_sec:
-        v_voc = verse_sec.placements.get("vocals")
-        assert v_voc is not None
-        assert v_voc.y >= 0.90, "No verso a voz deve estar ancorada no centro frontal (Center)"
-        assert v_voc.z <= 0.15, "No verso a voz deve estar ao nível do ouvido, sem subir ao teto"
-
-        throw_verse = verse_sec.placements.get("vocals::spatial_throw")
-        assert throw_verse is not None
-        assert throw_verse.is_muted or throw_verse.volume_gain == 0.0, "No verso a voz deve permanecer pura e intimista na frente"
-
-    if buildup_sec:
-        b_voc = buildup_sec.placements.get("vocals")
-        if b_voc:
-            assert b_voc.z >= 0.35, "No build-up os vocais devem ascender verticalmente em direção ao teto"
-
-    if chorus_sec:
-        c_other = chorus_sec.placements.get("other")
-        if c_other:
-            assert c_other.x >= 0.75, "No refrão sintetizadores e harmonia devem abraçar o ouvinte com abertura 360°"
-            assert c_other.y <= 0.0, "No refrão o envelope sonoro deve envolver os lados e a traseira"
-
-        throw_chorus = chorus_sec.placements.get("vocals::spatial_throw")
-        assert throw_chorus is not None
-        assert not throw_chorus.is_muted
-        assert throw_chorus.volume_gain >= 1.25, "No refrão o vocal throw deve ser proeminente e bem destacado"
-        assert throw_chorus.y <= -0.70, "No refrão o vocal throw deve sair nos módulos traseiros destacáveis (BL/BR)"
+    sr = 12000
+    t = np.arange(sr * 41) / sr
+    voice = .4*np.sin(2*np.pi*440*t)
+    drums = .5*np.sin(2*np.pi*100*t)*(t >= 12.)
+    stems = [StemTrack(k, k, "#66AAAA", sig[:, None].astype("f"), sr)
+             for k, sig in (("vocals", voice), ("drums", drums))]
+    sections = SongStructureIntelligence.analyze_and_arrange(stems, 41.)
+    assert len(sections) == 2
+    assert sections[0].end_time_s == sections[1].start_time_s == pytest.approx(12., abs=.35)
+    assert sections[-1].end_time_s == 41.
+    for section in sections:
+        p = section.placements["vocals"]
+        assert p.y >= .95 and p.z <= .1 and not p.is_stereo
+        assert all(element.source_stem_name != "vocals" for element in section.placements.values())
 
 
 def test_timeline_interactive_boundary_drag_and_minimap():
@@ -1149,41 +1094,32 @@ def test_surgical_stems_intelligence_and_room_mute_visuals():
         StemTrack("air_ambience", "Ambiência Aérea", "#76FF03", np.zeros((sr, 2), dtype=np.float32), sr),
     ]
 
-    sections = SongStructureIntelligence.analyze_and_arrange(stems, 120.0, DirectorPreset.BALANCED)
-    assert len(sections) >= 6
-
-    # Testar que pratos estão no teto
-    verse_sec = next(s for s in sections if "verso" in s.name.lower())
-    cym = verse_sec.placements.get("cymbals_hihat")
-    assert cym is not None
-    assert cym.z >= 0.70, "Pratos/hi-hats devem estar posicionados no teto (canais de altura)"
-
-    # Testar que backing_vocals não estão no centro
-    bv = verse_sec.placements.get("backing_vocals")
-    assert bv is not None
-    assert bv.is_stereo is True
-    assert abs(bv.x) >= 0.50, "Backing vocals devem estar afastados para as laterais"
-
-    # Testar que kick tem 100% LFE e z=0
-    k = verse_sec.placements.get("kick")
-    assert k is not None
-    assert k.lfe_send == 1.0
-    assert k.z == 0.0
-
-    # Testar RoomView714 com nomes resolvidos
+    sections = SongStructureIntelligence.analyze_and_arrange(stems, 1., DirectorPreset.BALANCED)
+    assert len(sections) == 1 and sections[0].section_type == "uniform"
+    scene = sections[0].placements
+    assert set(scene) == {s.name for s in stems}
+    assert scene["cymbals_hihat"].z >= .7
+    assert scene["backing_vocals"].is_stereo and abs(scene["backing_vocals"].x) >= .5
+    assert .5 < scene["kick"].lfe_send <= 1 and scene["kick"].z == 0.
     room = RoomView714()
-    room.set_stems_and_placements(stems, verse_sec.placements)
-    assert "lead_vocal::spatial_throw" in room.stems
-    assert room.stems["lead_vocal::spatial_throw"].display_name == "Vocal Throw (BL/BR)"
-
+    room.set_stems_and_placements(stems, scene)
+    scene["lead_vocal"].is_muted = True
+    room.set_playback_placements(scene)
+    assert room.placements["lead_vocal"].is_muted
     room.deleteLater()
     app.processEvents()
 
 
+def test_worker_success_reaps_detached_descendant(tmp_path):
+    import subprocess
+    import sys
+    import psutil
 
-
-
-
-
-
-
+    marker = tmp_path/"pid"
+    child_code = ("import subprocess,sys; from pathlib import Path; "
+                  "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True); "
+                  "Path(sys.argv[1]).write_text(str(p.pid))")
+    env = {**os.environ, "ATMOSSPLIT_PARENT_PID": str(os.getpid())}
+    subprocess.run([sys.executable, "-m", "src.separation.supervisor", "-c", child_code, str(marker)],
+                   env=env, check=True, timeout=8)
+    assert not psutil.pid_exists(int(marker.read_text()))

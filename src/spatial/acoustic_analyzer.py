@@ -30,57 +30,37 @@ class AcousticAnalyzer:
     @staticmethod
     def analyze_stem(stem_name: str, audio_data: np.ndarray, sample_rate: int = 44100) -> StemAcousticProfile:
         """Calcula o perfil acústico multidimensional da faixa."""
-        if audio_data.ndim == 1:
-            audio_data = np.column_stack([audio_data, audio_data])
-
-        num_samples = audio_data.shape[0]
-        if num_samples == 0:
-            return StemAcousticProfile(
-                stem_name=stem_name,
-                rms_energy=0.0,
-                peak_amplitude=0.0,
-                crest_factor_db=0.0,
-                spectral_centroid_hz=0.0,
-                stereo_width_ratio=0.0,
-                sub_bass_energy_ratio=0.0,
-                low_mid_energy_ratio=0.0,
-                high_freq_energy_ratio=0.0,
-                is_percussive=False
-            )
-
-        # 1. Energia RMS e Pico
-        peak = float(np.max(np.abs(audio_data)))
-        rms = float(np.sqrt(np.mean(audio_data ** 2))) + 1e-9
-        crest_factor = 20.0 * np.log10(max(peak / rms, 1.0))
-
-        # 2. Largura estéreo (Mid / Side)
-        mid = 0.5 * (audio_data[:, 0] + audio_data[:, 1])
-        side = 0.5 * (audio_data[:, 0] - audio_data[:, 1])
-        energy_mid = float(np.sum(mid ** 2)) + 1e-9
-        energy_side = float(np.sum(side ** 2))
-        stereo_width = energy_side / (energy_mid + energy_side)
-
-        # 3. FFT e densidade energética por faixas
-        # Usar um trecho central de até 10 segundos para cálculo ágil
-        max_samples_fft = min(num_samples, sample_rate * 10)
-        start_idx = (num_samples - max_samples_fft) // 2
-        chunk_mid = mid[start_idx:start_idx + max_samples_fft]
-
-        fft_vals = np.abs(np.fft.rfft(chunk_mid))
-        freqs = np.fft.rfftfreq(len(chunk_mid), d=1.0 / sample_rate)
-        total_fft_energy = float(np.sum(fft_vals ** 2)) + 1e-9
-
-        # Faixas de frequência
-        mask_sub = freqs < 80.0
-        mask_low_mid = (freqs >= 80.0) & (freqs < 500.0)
-        mask_high = freqs >= 5000.0
-
-        sub_energy = float(np.sum(fft_vals[mask_sub] ** 2)) / total_fft_energy
-        low_mid_energy = float(np.sum(fft_vals[mask_low_mid] ** 2)) / total_fft_energy
-        high_energy = float(np.sum(fft_vals[mask_high] ** 2)) / total_fft_energy
-
-        # Centróide espectral
-        centroid = float(np.sum(freqs * fft_vals) / (np.sum(fft_vals) + 1e-9))
+        data = np.asarray(audio_data)
+        if data.ndim == 1:
+            data = data[:, None]
+        if not len(data):
+            return StemAcousticProfile(stem_name, 0., 0., 0., 0., 0., 0., 0., 0., False)
+        # RMS e largura em toda a faixa, memória temporária limitada.
+        energy = side_energy = 0.
+        peak = 0.
+        for i in range(0, len(data), 65536):
+            block = data[i:i+65536]
+            energy += float(np.einsum("ij,ij->", block, block, dtype="d")) / block.shape[1]
+            peak = max(peak, float(np.abs(block).max()))
+            if block.shape[1] >= 2:
+                side = .5*(block[:, 0]-block[:, 1])
+                side_energy += float(np.dot(side, side))
+        rms = np.sqrt(energy/len(data))
+        crest_factor = 20*np.log10(max(1., peak/max(rms, 1e-12)))
+        stereo_width = side_energy/max(energy, 1e-15)
+        # Amostras distribuídas ao longo da música; potência L/R preserva conteúdo fora de fase.
+        size = min(4096, len(data))
+        window = np.hanning(size) if size > 2 else np.ones(size)
+        spectrum = np.zeros(size//2+1)
+        for i in np.linspace(0, len(data)-size, min(64, 1+len(data)//size), dtype=int):
+            spectrum += (np.abs(np.fft.rfft(data[i:i+size]*window[:, None], axis=0))**2).mean(axis=1)
+        freqs = np.fft.rfftfreq(size, 1/sample_rate)
+        total = max(spectrum.sum(), 1e-15)
+        sub_energy = spectrum[freqs < 80].sum()/total
+        low_mid_energy = spectrum[(freqs >= 80) & (freqs < 500)].sum()/total
+        high_energy = spectrum[freqs >= 5000].sum()/total
+        magnitude = np.sqrt(spectrum)
+        centroid = np.dot(freqs, magnitude)/max(magnitude.sum(), 1e-15)
 
         # Heurística de transiente percussivo (fator de crista alto)
         is_percussive = crest_factor > 12.0 or "drum" in stem_name or "kick" in stem_name or "snare" in stem_name

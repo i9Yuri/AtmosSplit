@@ -107,17 +107,11 @@ class SamsungDLNABridge:
                 is_surround=True
             )
 
-            def _cast_worker():
-                try:
-                    success, msg = play_on_renderer(item, target_renderer)
-                    log.info("DLNA Cast resultado: %s - %s", success, msg)
-                    if success and auto_picture_off:
-                        self.turn_off_tv_screen()
-                except Exception as ex:
-                    log.warning("Erro no thread de cast DLNA: %s", ex)
-
-            threading.Thread(target=_cast_worker, daemon=True).start()
-            return True
+            success, message = play_on_renderer(item, target_renderer)
+            log.info("Resposta do renderer DLNA: %s", message)
+            if success and auto_picture_off:
+                self.turn_off_tv_screen()
+            return bool(success)
 
         except Exception as ex:
             log.debug("Ponte DLNA do AtmosHunter indisponível: %s", ex)

@@ -1,157 +1,81 @@
-# AtmosSplit — Documento Mestre de Arquitetura e Contexto Integral
+# AtmosSplit — Estúdio de áudio espacial 7.1.4
 
-## 1. Visão Geral e Objetivo do Sistema
+## 1. Visão geral
 
-**AtmosSplit** é uma aplicação desktop nativa em Python 3 + PySide6, 100% gratuita, offline-first e de custo zero (R$ 0,00), projetada para decompor faixas musicais em múltiplas camadas instrumentais/vocais e montá-las espacialmente em um sistema **Dolby Atmos 7.1.4 canais**.
+O AtmosSplit prepara uma faixa local, separa quatro ou nove stems, propõe um arranjo espacial editável e entrega o master para a JBL Bar 1000 MK2. A sessão contém uma camada macro de seções e uma camada micro de envios temporários. As duas alimentam o monitor binaural e o master de doze canais. A análise, os pesos do modelo, a sessão e o render ficam no computador. A busca de música online é uma ação explícita do operador.
 
-- **Problema central resolvido:** DAWs profissionais de áudio espacial (como Pro Tools Ultimate, Logic Pro ou Nuendo) custam milhares de reais e exigem conhecimentos densos de roteamento de estúdio (busses, beds, objects, binaural metadata, panners esféricos). O AtmosSplit oferece uma interface visual intuitiva da sala (planta 2D + camada de altura com drag-and-drop), pré-escuta binaural HRTF imediata no fone (Havit H2002D / QCY N70) e exportação/reprodução em 1 clique para a **JBL Bar 1000MK2** (7.1.4) via HDMI eARC / DLNA.
-- **Hardware de referência:**
-  - Estação: Nobara Linux (KDE Plasma, Wayland, PipeWire), CPU Intel Xeon E5-2667 v2 (8c/16t, AVX, Ivy Bridge-EP), GPU AMD Radeon RX 580 2048SP (8 GB VRAM, Polaris 20, gfx803) e 32 GB RAM DDR3.
-  - Reprodução: Soundbar JBL Bar 1000 / 1000MK2 conectada via HDMI eARC à TV Samsung Tizen.
-  - Pré-escuta: Headsets Havit H2002D / QCY N70 com simulação binaural HRTF e suporte a múltiplos endpoints de saída.
+## 2. Mapa do código
 
----
+| Local | Responsabilidade |
+|---|---|
+| `src/acquisition/` | SHA-256, tags/capa, sondagem por ffprobe, decodificação estéreo na taxa real e busca opcional por provedor. |
+| `src/separation/` | HTDemucs local, subdivisão complementar, projeção vocal coerente, política Linux do worker e publicação atômica de stems FLOAT. |
+| `src/spatial/music_structure.py`, `acoustic_analyzer.py` | Grade rítmica, famílias harmônicas e rítmicas, perfis de fonte e evidências por seção. |
+| `src/spatial/auto_director.py`, `song_intelligence.py`, `micro_events.py` | Poses por preset e tipo de seção, análise de ataques, seleção e trajetórias de gestos temporários. |
+| `src/spatial/timeline_manager.py`, `mix_engine.py` | Edição, grade e projeções visuais, preparação de áudio, cenas imutáveis e avaliação dos ganhos por amostra. |
+| `src/spatial/live_player.py`, `native_monitor.py`, `monitor_callback.c`, `binaural_hrtf.py` | Produtor Python, render binaural com estado de filtros e atrasos, fila C11 e callback do PortAudio. |
+| `src/spatial/master_renderer.py`, `metering.py` | Master PCM, buses de medição vocal, loudness integrado e pico verdadeiro. |
+| `src/playback/` | Encoder JOC, medição no bitstream decodificado, publicação WAV/MP4/MKV e pontes locais de reprodução. |
+| `src/ui/` | Janela e trabalhos de estúdio, lista de fontes, sala, inspetor, transporte, marcadores e timeline. O protocolo do worker transporta JSON. Os buffers de áudio circulam pelo disco e pela memória local. |
+| `scripts/`, `tests/` | Instalação do lançador, diagnóstico do ambiente, calibração dos canais e regressões de áudio, codec, processos e interface. |
 
-## 2. Mapa Estrutural do Repositório
+## 3. Da faixa ao arranjo
 
-```
-AtmosSplit/
-├── PROJECT_CONTEXT.md               # Especificação mestra de arquitetura e contexto
-├── ENVIRONMENT_REPORT.md            # Relatório factual da Fase 0 (Auditoria, Benchmarks e Formatos)
-├── README.md                        # Guia de usuário e desenvolvedor
-├── CHANGELOG.md                     # Registro cronológico de mudanças
-├── Abrir_AtmosSplit.desktop         # Atalho de dois cliques no Dolphin / gerenciador de arquivos
-├── AtmosSplit.desktop               # Desktop entry padrão FreeDesktop
-├── Abrir_AtmosSplit.sh              # Script shell executável de inicialização
-├── iniciar.sh                       # Launcher principal (nice 0 para UI, setup Wayland)
-├── .venv/                           # Ambiente virtual Python 3.11 isolado (uv)
-├── scripts/
-│   ├── probe_stems_env.py           # Benchmark empírico de IA (Xeon vs RX 580) e sondagem DSP
-│   ├── probe_714_playback.py        # Gerador diagnóstico de matriz 12 canais (7.1.4) e encoders
-│   └── install_desktop_entry.sh     # Instalador do atalho .desktop no KDE Plasma
-├── src/
-│   ├── acquisition/
-│   │   ├── __init__.py
-│   │   ├── file_source.py           # Ingestão local (FLAC, WAV, ALAC, MP3, M4A, Opus, OGG) e tags
-│   │   ├── search_source.py         # Busca integrada (Soulseek Hi-Res, Monochrome, yt-dlp fallback)
-│   │   └── probe_verifier.py        # Auditoria honesta de codec, canais e bitrate via ffprobe
-│   ├── separation/
-│   │   ├── __init__.py
-│   │   ├── stem_engine.py           # Orquestrador multi-estágio (Macro Demucs + Sub-divisão DSP cirúrgica)
-│   │   ├── cache_manager.py         # Cache baseado em SHA-256 com estatísticas e limpeza atômica
-│   │   ├── process_shield.py        # Isolamento térmico/CPU (nice -n 19, ionice idle, afinidade núcleos 2-15)
-│   │   └── worker_cli.py            # Subprocesso desacoplado com streaming JSON via QProcess (Zero travamento GUI)
-│   ├── spatial/
-│   │   ├── __init__.py
-│   │   ├── acoustic_analyzer.py     # Análise de envelopes, centróides e correlação Mid/Side
-│   │   ├── auto_director.py         # Montador automático 7.1.4 musical (Auto Atmos Director) e presets
-│   │   ├── vbap_engine.py           # Motor VBAP 7.1.4 3D com conservação de potência constante (L2 norm)
-│   │   ├── binaural_hrtf.py         # Pré-escuta binaural com continuidade de fase (zi) e ITD/IID
-│   │   ├── live_player.py           # Streamer contínuo com cache de ganhos VBAP e snapshot desacoplado
-│   │   ├── master_renderer.py       # Renderizador final com limiter anti-clipping e EBU R128 (-14 LUFS)
-│   │   └── timeline_manager.py      # Automação dinâmica por trechos (Hermite smoothstep crossfade 3D)
-│   ├── playback/
-│   │   ├── __init__.py
-│   │   ├── exporter.py              # Exportação em MKV LPCM 7.1.4 (12ch) e E-AC-3/TrueHD 7.1
-│   │   ├── directframe_bridge.py    # Disparo 1-clique para passthrough HDMI no DirectFrame
-│   │   └── samsung_dlna_bridge.py   # Streaming DLNA/UPnP para TV Samsung + KEY_PICTURE_OFF
-│   └── ui/
-│       ├── __init__.py
-│       ├── main_window.py           # Janela principal PySide6 (Tema Hallmark, polling 30 FPS, seletor de áudio)
-│       ├── room_view_714.py         # Visualizador interativo 2D/3D da sala 7.1.4 com drag-and-drop
-│       ├── stem_card.py             # Componente de controle de instrumento (Sliders de Altura, LFE e Pan)
-│       └── timeline_widget.py       # Barra de automação temporal interativa (divisão, renomeação e seleção)
-└── tests/
-    ├── multichannel_diagnostics/    # Áudios de diagnóstico e auditoria 7.1.4
-    ├── benchmark_data/              # Dados e áudios de teste de benchmark de IA
-    └── test_atmossplit.py           # Suíte pytest completa (acústica, VBAP, cache, exportação, estabilidade)
-```
+1. O worker identifica o arquivo e procura a sessão e o cache pelo SHA-256 e pelo modo. Em cache frio, reamostra para a taxa nativa do modelo, separa em CPU e devolve os stems à taxa da origem. A separação cirúrgica usa bandas complementares e um residual estéreo. A soma das componentes de cada instrumento recompõe o stem macro. Na voz, o eixo Mid preserva o componente central. Em uma imagem fortemente lateralizada ou com polaridade invertida, o eixo coerente dominante recupera a voz para o FC.
+2. O MIR combina chroma, cepstro mel, fluxo espectral, energia de sub, largura Mid/Side, atividade contínua da voz e densidade percussiva. A mix original fornece a informação harmônica quando disponível. A autocorrelação estima o pulso, os ataques locais corrigem a grade e os acentos ajudam a escolher métrica ternária ou quaternária. O contraste multiescala de Foote usa faixas locais da matriz de autossimilaridade. Os segmentos recorrentes formam famílias por agrupamento completo. Sem pulso confiável, a mudança acústica situa a fronteira. Material uniforme pode ocupar uma única seção. Os rótulos e o grau de confiança são estimativas acústicas editáveis. [Foote e segmentação por novidade](https://www.audiolabs-erlangen.de/resources/MIR/FMP/C4/C4S4_NoveltySegmentation.html)
+3. A direção macro aplica os movimentos relativos ao estilo e à intensidade. As fronteiras interpolam ganhos com curvas Hermite, com duração limitada pelas duas seções e pelo andamento. A transição de build-up ou para o outro pode ocupar um compasso. As divisões e fusões mantêm os compassos, a família e os eventos.
+4. A camada micro mede energia e variação espectral estéreo a cada 5 ms. Compara duração, intervalos e assinatura de bandas para identificar repetições e respostas após uma frase. Notas sustentadas em refrão/clímax só disparam um throw quando há atividade instrumental coincidente. Nos stems instrumentais, a análise procura séries de ataques, abertura de pratos, acentos harmônicos e entradas de baixo. Os detectores usam evidência acústica e dispensam transcrição e reconhecimento de palavras.
+5. Cada `SpatialEvent` registra tempos absolutos, ataque/liberação, fonte, tipo, confiança, intensidade, início/fim da trajetória, ganho, largura e LFE. Pares silábicos concorrem como um gesto. A seleção limita densidade, sobreposição e repetição por seção. A intensidade controla ganho e limiar de audibilidade. Os envios usam o áudio simultâneo do próprio stem, com envelope suave por amostra. A âncora frontal continua disponível durante a projeção. O LFE recebe apenas o envio passa-baixas. O relógio da apresentação na sala acompanha as amostras consumidas pelo dispositivo.
 
----
+## 4. Monitor, perfil JBL e entrega
 
-## 3. Pipeline Passo a Passo
+**Monitor.** O produtor mantém até três blocos estéreo de 1.024 amostras a 48 kHz. O DSP e a HRTF ocorrem fora do callback. A função que PortAudio invoca é C11. Faz cópias limitadas, completa underruns com silêncio e publica contadores atômicos. Cada seek troca a fila e limpa o estado binaural. O produtor mantém a fila anterior viva até o callback confirmar a troca. O dispositivo drena o último bloco no término natural. Volume de escuta e proteção de saída são locais ao monitor.
 
-```mermaid
-flowchart TD
-    A["Entrada: Arquivo Local, Duplo Clique ou Busca"] --> B["Auditoria ffprobe & Extração de Metadados"]
-    B --> C{"Cache SHA-256 Existe?"}
-    C -- Sim --> D["Carregamento Instantâneo dos Stems (< 0.5s)"]
-    C -- Não --> E["Motor de Separação em Subprocesso QProcess"]
-    E --> F["Process Shield: nice 19 + Afinidade Núcleos 2-15"]
-    F --> G["Estágio 1: Macro-Stems (htdemucs)"]
-    G --> H["Estágio 2: Sub-divisão Cirúrgica DSP"]
-    H --> I["Isolamento: Kick, Snare, Pratos, Sub-LFE < 80Hz, Baixo, Voz e Coro"]
-    I --> D
-    D --> J["Analisador Acústico & Auto Atmos Director"]
-    J --> K["Posicionamento Inicial 7.1.4 (Presets Musicais)"]
-    K --> L["Interface da Sala 7.1.4 (Polling 30 FPS + Drag-and-Drop)"]
-    L --> M["Live Player: Cache de Ganhos VBAP + HRTF com Continuidade zi"]
-    M --> N["Master Renderer: Limiter Anti-Clipping & Normalização EBU R128"]
-    N --> O1["TV Samsung Tizen / Celular (Wi-Fi DLNA via Rygel / BubbleUPnP)"]
-    N --> O2["Arquivo MP4 Dolby Digital Plus 7.1 (E-AC-3 1024k)"]
-    N --> O3["DirectFrame (Cabo HDMI eARC Passthrough / MKV LPCM 7.1.4)"]
-```
+**Calibração.** O perfil JBL reduz dinamicamente até 3,5 dB de conteúdo concorrente entre 1 e 4,5 kHz nas fontes harmônicas e backing durante atividade vocal. O mascaramento recebe tratamento adicional no FC. O perfil Estúdio fornece a referência para A/B. O pan compensa a correlação e a sobreposição dos canais de uma fonte espelhada. O master aplica um único ganho limitado pelo alvo de −18 LUFS e pelo teto de −1 dBTP. A medição usa filtro K, janelas de 400 ms, portas absoluta e relativa, ponderação por posição e exclusão do LFE. O relatório mostra a relação voz/instrumental nas janelas de voz ativa, tanto ponderada em banda larga quanto na banda de presença. [ITU-R BS.1770-4](https://www.itu.int/rec/R-REC-BS.1770-4-201510-S/en)
 
----
+**Entrega.** A ordem PCM é FL, FR, FC, LFE, BL, BR, SL, SR, TFL, TFR, TBL, TBR. WAVEX registra a máscara `0x2D63F`. MKV contém PCM de 24 bits e uma tag de ordem de canais. A saída efetiva via HDMI depende do dispositivo e do layout negociado. O MP4 contém H.264 com imagem estática, capa quando disponível, E-AC-3 JOC a 768 kbit/s e índice `moov` no início. O vídeo segue a duração do áudio. O codec pode acrescentar até dois quadros de 32 ms para preservar a última amostra.
 
-## 4. Restrições Críticas de Hardware, SO e Ambiente
+O JOC transporta onze objetos full-range fixados nas posições da sala e um canal LFE no bed 5.1. A trajetória já está impressa nas amplitudes dos objetos. O contêiner EMDF gerado pelo ac3forge acompanha o mesmo downmix full-range, com o LFE escrito diretamente no sexto canal. Dialnorm 31, ganhos dos objetos unitários. A exportação decodifica todos os quadros e mede o pico interpolado 4× no bed e nos objetos. Se necessário, aplica atenuação vinculada e recodifica. A interface informa pico decodificado e ajuste do codec. O ffprobe pode anunciar seis canais para o bed de um fluxo com perfil Atmos. [ETSI TS 103 420](https://www.etsi.org/deliver/etsi_ts/103400_103499/103420/01.01.01_60/ts_103420v010101p.pdf)
 
-1. **CPU Intel Xeon E5-2667 v2 (Ivy Bridge-EP):**
-   - Possui AVX 1.0, SSE4.2 e 16 vCPUs (8 núcleos / 16 threads).
-   - **NÃO possui instruções AVX2 / FMA3.** O código Python e bibliotecas C/C++ devem respeitar compilações com AVX padrão.
-   - A interface gráfica (`MainWindow`) e o streaming de áudio operam em prioridade normal (`nice 0`) para máxima fluidez a 60 FPS e sem estalos.
-   - Os workers pesados de IA rodam isolados com `nice -n 19`, `ionice -c 2 -n 7` e afinidade nos núcleos 2 a 15, garantindo que os núcleos 0 e 1 fiquem 100% livres para o KWin Wayland e PipeWire.
-   - O cancelamento ou fechamento do app mata a árvore completa de processos via `psutil` (eliminando qualquer processo órfão).
-2. **GPU AMD Radeon RX 580 2048SP (Polaris, gfx803):**
-   - Arquitetura Polaris não é suportada pelas versões modernas do ROCm no Linux; tentativas de forçar ROCm causam *GPU Ring Hang*.
-   - PyTorch opera com `CUDA_VISIBLE_DEVICES=""` e `HIP_VISIBLE_DEVICES=""`. Aceleração gráfica opera de forma estável via driver Mesa RADV / Wayland.
-3. **Cadeia de Áudio 7.1.4 (JBL Bar 1000MK2 + TV Samsung Tizen):**
-   - O FFmpeg 8.1.3 do sistema possui suporte nativo ao layout canônico `7.1.4` (`FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR+TBL+TBR`).
-   - O contêiner MKV com LPCM 7.1.4 (`pcm_s24le`, 12 canais discretos) preserva integridade total de 12 canais.
-   - Caso a TV Samsung limite a entrada HDMI a 7.1 (8 canais), o AtmosSplit fornece fallback em TrueHD 7.1 e E-AC-3 7.1 com matrixing de canais de altura.
+## 5. Ambiente, estado e operação
 
----
+- Nobara, KDE Plasma, Wayland e PipeWire. Xeon E5-2667 v2, 32 GB, RX 580 2048SP. GUI e áudio com prioridade normal. Workers de cálculo em subprocessos com nice 19, I/O idle, CPUs 2–15 e até oito threads. O supervisor Linux registra-se como subreaper, observa a saída do processo pai e recolhe os descendentes antes de encerrar. `CUDA_VISIBLE_DEVICES` e `HIP_VISIBLE_DEVICES` vazias. `HF_HUB_OFFLINE=1`. O modelo usa apenas pesos locais.
+- O primeiro uso do monitor compila o callback com o `cc` local para x86-64 básico. A biblioteca identificada pelo conteúdo fica em `.venv/lib/atmossplit-native/` na instalação deste projeto. Os atômicos de ponteiro e contador precisam ser lock-free na compilação. [Interface de callback C do sounddevice](https://github.com/spatialaudio/python-sounddevice/blob/master/src/sounddevice.py)
+- Pintura Qt com cores e pincéis sólidos, QSS com tokens em paleta Dark Obsidian Studio (#0A0D14, #111622, #38BDF8), cantos modernos (8px–12px), feedback de foco e progresso com barra dedicada StudioProgressBar (%p%). A blindagem de refcount é limitada a CPython 3.11/Linux. O transporte é consultado pela GUI em intervalos de 16 ms ou 100 ms no modo de movimento reduzido.
+- Separação com Demucs em CPU executa com shifts=0 (evitando reprocessamento redundante) e callback dinâmico por trecho (chunk-by-chunk) emitindo progresso contínuo e tempo restante estimado (ETA), com suporte a cancelamento cooperativo imediato.
+- Stems em `$XDG_CACHE_HOME/atmossplit/stems_cache` ou `~/.cache/atmossplit/stems_cache`. O modo cirúrgico usa a geração `_surgical_v2`. Escritores publicam primeiro os WAVs, depois o manifesto. A limpeza coordena escritores/leitores e preserva a faixa aberta. Arranjos ficam em `QStandardPaths.AppDataLocation/sessions`, por hash e modo. Preferências ficam em QSettings.
+- FFmpeg/ffprobe, libsndfile, PySide6/Shiboken6 6.12.0, PortAudio, SciPy, NumPy, CFFI, psutil, PyTorch e HTDemucs locais. O transporte do codec foi verificado no ac3forge 0.10.0b1. A busca opcional pode usar o catálogo remoto ou yt-dlp. Os botões Rygel/DLNA e DirectFrame usam as integrações locais quando presentes.
 
-## 5. Configurações Globais e Dependências
+## 6. Operação e validação
 
-- **Runtime:** Python 3.11.17 isolado em `.venv` gerenciado via `uv`.
-- **Dependências de IA e Áudio:** `demucs 4.1.0`, `torch 2.15.0`, `torchaudio 2.11.1`, `soundfile 0.14.0`, `sounddevice 0.5.6`, `scipy 1.17.1`, `numpy 2.4.6`, `psutil 7.2.2`, `librosa 0.11.0`, `mutagen 1.48.1`.
-- **Interface Gráfica:** `PySide6 6.12.0` no Wayland nativo.
-- **Rede e Busca:** `aioslsk 1.7.2` (Soulseek assíncrono), `requests`, integração com `yt-dlp`.
-- **Binários do Sistema:** `/usr/bin/ffmpeg` (v8.1.3) e `/usr/bin/ffprobe`.
-- **Diretório de Cache:** `~/.cache/atmossplit/stems_cache/`.
-
----
-
-## 6. Instruções Críticas para IAs que Modificarem Este Código
-
-### O que NUNCA fazer
-- **NÃO fixar durações estáticas (ex: `:d=10`) no gerador de vídeo do FFmpeg** — o vídeo estático deve sempre adotar a duração calculada dinamicamente da matriz de áudio (`d={duration_s}` e `-t {duration_s}`), para nunca truncar a música.
-- **NÃO usar formatos incompatíveis com DLNA para Wi-Fi** — a TV Samsung Tizen via Wi-Fi/DLNA rejeita LPCM 12 canais em MKV; para transmissão sem fio use sempre MP4 com E-AC-3 7.1 (`MP4_EAC3_71`) e faststart.
-- **NÃO colocar nice 19 na interface gráfica** — a GUI e o callback de áudio precisam rodar com prioridade normal para resposta instantânea do mouse e ausência de XRUNs.
-- **NÃO invocar sinais Qt diretamente de dentro do callback ALSA/PipeWire** — utilize o padrão de snapshot atômico com polling via `QTimer` para zero contenção de locks.
-- **NÃO forçar ROCm na RX 580 Polaris** sem validação prévia de estabilidade de anéis de GPU — priorize CPU Xeon com isolamento de prioridade.
-- **NÃO usar hex CSS com 8 dígitos (`#rrggbbaa`) no QSS do Qt** — o Qt interpreta como `#aarrggbb`, distorcendo cores. Use `rgba(r, g, b, alpha)`.
-- **NÃO deixar processos órfãos ao cancelar IA** — sempre mate a árvore inteira de processos com `psutil.Process(pid).children(recursive=True)`.
-
-### Comandos de Execução e Testes
 ```bash
-# Executar suíte completa de testes automatizados (13 testes)
-.venv/bin/pytest tests/test_atmossplit.py -v
-
-# Executar benchmark de ambiente e IA
-.venv/bin/python scripts/probe_stems_env.py
-
-# Gerar arquivos de diagnóstico multicanal 7.1.4
-.venv/bin/python scripts/probe_714_playback.py
-
-# Iniciar a aplicação desktop
 ./iniciar.sh
+.venv/bin/pytest -v
+.venv/bin/python -m compileall -q src scripts tests
+.venv/bin/python scripts/probe_714_playback.py
 ```
 
----
+O diagnóstico gera três arquivos de calibração em `tests/multichannel_diagnostics/`. Cada canal recebe três pulsos suaves com pico de −20 dBFS, na ordem PCM acima. Com o intervalo padrão de dois segundos, o centro começa em 4 s, o LFE em 6 s e os quatro canais de teto em 16, 18, 20 e 22 s. Os testes automatizados cobrem pulsos 3/4 e 4/4, recorrência, silêncio, ganho mono/estéreo, fase vocal, eventos acústicos com instante conhecido, monitor C11, decodificação JOC, cauda final, restauração da sessão e cancelamento de workers.
+
+As medições com áudio decodificado, a faixa local de referência e o ensaio no dispositivo estão no [relatório do ambiente](ENVIRONMENT_REPORT.md).
 
 ## 7. Histórico de Versões e Decisões Críticas Recentes
+
+- **2026-11-20 (v2.0.1 — Design Monocromático de Alta Fidelidade AMOLED / Claro, Botão de Tema Discreto e Resolução de Carregamento Demucs):**
+  - **Resolução do Carregamento Infinito (Chunk Progress & CPU Optimization):**
+    - Identificada e eliminada a sensação de congelamento eterno durante o carregamento/separação de faixas: no processador Intel Xeon E5-2667 v2 (sem aceleração por GPU), a inferência de 50 chunks do Demucs levava até 7 minutos com `shifts=1` sem qualquer feedback intermediário (barra congelada em 18%).
+    - Integrado callback contínuo `on_chunk(current, total)` no `stem_engine.py` emitindo fração, porcentagem e estimativa de tempo (ETA) a cada 4–6 segundos diretamente para o `StudioProgressBar`.
+    - Ajustado `shifts_val = 0` na execução em CPU, reduzindo o tempo de inferência pela metade (~3.5 min) sem perda perceptível de separação estéreo.
+    - Suporte a cancelamento instantâneo via `cancel_check()` dentro de cada bloco do modelo.
+  - **Repaginação Visual Profissional (Zero Cor Tema, Padrão Hallmark / Impeccable):**
+    - Erradicação de paletas verdes e saturações amadoras.
+    - Dois temas neutros de alta fidelidade:
+      - **Escuro AMOLED:** Fundo preto absoluto (`#000000`), painéis em grafite (`#0B0B0D`), linhas de contraste sutil (`#28282D`) e tipografia nítida em branco (`#FFFFFF`).
+      - **Claro de Estúdio:** Papel/zinco limpo (`#F4F4F6`), painéis brancos (`#FFFFFF`), linhas suaves (`#D1D5DB`) e tinta escura (`#09090B`).
+    - Botão discreto no cabeçalho superior (`☀️ Claro` / `🌙 AMOLED`) e ação no menu da sessão, com persistência em `QSettings("ui/theme")` e repintura dinâmica e instantânea de todos os elementos sem necessidade de reiniciar.
+  - **Validação de Testes:** 60 testes automatizados passando 100% (`test_studio_ui.py`, `test_micro_choreography.py`, `test_music_and_master.py`, `test_atmossplit.py`).
+
+- **2026-11-20 · 2.0.0.** Estúdio em duas camadas, monitor C11 e entrega JOC com LFE discreto. As entradas abaixo descrevem implementações anteriores.
 
 - **2026-11-19 (v1.8.2 — Animação 3D em Tempo Real da Sala 7.1.4, Mapeamento Cirúrgico e Desbloqueio do Vocal Throw):**
   - **Pré-visualização Tridimensional Ativa em Tempo Real (`RoomView714`):**

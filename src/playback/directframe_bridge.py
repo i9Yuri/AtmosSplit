@@ -53,7 +53,7 @@ class DirectFrameBridge:
             cmd = [
                 mpv_bin,
                 "--audio-spdif=ac3,eac3,truehd,dts-hd,dts",
-                "--audio-channels=7.1.4,7.1,auto",
+                "--audio-channels=fl-fr-fc-lfe-bl-br-sl-sr-tfl-tfr-tbl-tbr",
                 "--audio-exclusive=yes",
                 str(p)
             ]

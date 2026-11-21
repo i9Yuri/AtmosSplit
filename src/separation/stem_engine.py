@@ -9,19 +9,19 @@ Implementa pipeline multi-estágio:
 
 from __future__ import annotations
 
-import os
+import math
 import time
 import logging
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Callable, Any
 
 import numpy as np
-import soundfile as sf
 from scipy import signal
 
-from .process_shield import apply_process_shield, get_shielded_thread_count
-from .cache_manager import StemCacheManager, CachedStemMetadata
+from .process_shield import get_shielded_thread_count
+from .cache_manager import StemCacheManager
+from .vocal_image import vocal_axis
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +200,47 @@ STEM_DEFINITIONS = {
 }
 
 
+def split_surgical(macro: dict[str, np.ndarray], rate: int) -> dict[str, np.ndarray]:
+    """Subdivisão aditiva. A soma de cada par de bandas recupera o sinal original."""
+    def lowpass(data: np.ndarray, hz: float) -> np.ndarray:
+        if hz >= rate / 2 or len(data) < 2:
+            return data.copy()
+        sos = signal.butter(4, hz, fs=rate, output="sos")
+        return signal.sosfiltfilt(sos, data, axis=0, padlen=min(15, len(data)-1)).astype("float32")
+
+    drums, bass, vocals, other = (macro[k] for k in ("drums", "bass", "vocals", "other"))
+    kick = lowpass(drums, 120)
+    upper = drums - kick
+    snare = lowpass(upper, 5000)
+    sub = lowpass(bass, 80)
+    body = lowpass(other, 6000)
+    # O componente comum conserva a amplitude inteira de uma voz central.
+    # O residual estéreo inclui as caudas laterais reais, inclusive em baixa frequência.
+    axis = np.asarray(vocal_axis(vocals), dtype="f")
+    if abs(axis[0]-axis[1]) < 1e-6:
+        lead = np.repeat(vocals.mean(axis=1, keepdims=True), 2, axis=1)
+    else:
+        lead = (vocals @ axis)[:, None]*axis
+    return dict(lead_vocal=lead, backing_vocals=vocals-lead, kick=kick, snare=snare,
+                cymbals_hihat=upper-snare, sub_bass_lfe=sub, melodic_bass=bass-sub,
+                guitar_keys=body, air_ambience=other-body)
+
+
+def _tracks(arrays: dict[str, np.ndarray], rate: int) -> list[StemTrack]:
+    tracks = []
+    for name, data in arrays.items():
+        fields = STEM_DEFINITIONS.get(name, {"display_name": name, "color_hex": "#70B6AD"})
+        tracks.append(StemTrack(name=name, audio_data=data, sample_rate=rate, **fields))
+    return tracks
+
+
+def _resample(data: np.ndarray, source_rate: int, rate: int) -> np.ndarray:
+    if source_rate == rate:
+        return data
+    divisor = math.gcd(source_rate, rate)
+    return signal.resample_poly(data, rate // divisor, source_rate // divisor, axis=0)
+
+
 class DeepStemEngine:
     def __init__(self, cache_manager: Optional[StemCacheManager] = None):
         self.cache_manager = cache_manager or StemCacheManager()
@@ -210,15 +251,36 @@ class DeepStemEngine:
         if self._demucs_model is not None:
             return self._demucs_model
         
-        apply_process_shield(reserve_cores=2)
         import torch
+        from demucs.apply import BagOfModels
         from demucs.pretrained import get_model
-        log.info("Carregando modelo Demucs htdemucs...")
-        model = get_model("htdemucs")
+        torch.set_num_threads(get_shielded_thread_count())
+        try:
+            from demucs.hf import load_safetensors_model
+            from huggingface_hub import hf_hub_download
+            weights = hf_hub_download("adefossez/HTDemucs", "955717e8.safetensors", local_files_only=True)
+        except (ImportError, OSError):
+            checkpoints = Path(torch.hub.get_dir()) / "checkpoints"
+            if not (checkpoints / "955717e8-8726e21a.th").is_file():
+                raise FileNotFoundError("Pesos htdemucs ausentes do cache local (955717e8).") from None
+            model = get_model("955717e8", repo=checkpoints)
+        else:
+            model = BagOfModels([load_safetensors_model(weights)])
         model.cpu()
         model.eval()
         self._demucs_model = model
         return self._demucs_model
+
+    def load_cached_result(self, file_hash: str, mode: str) -> SeparationResult | None:
+        start = time.monotonic()
+        manifest = self.cache_manager.get_manifest(file_hash, mode)
+        if not manifest:
+            return None
+        arrays = self.cache_manager.load_stems(file_hash, mode)
+        if not arrays:
+            return None
+        return SeparationResult(_tracks(arrays, manifest[0].sample_rate), mode, file_hash,
+                                time.monotonic() - start, True)
 
     def separate_track(
         self,
@@ -236,50 +298,18 @@ class DeepStemEngine:
         t0 = time.time()
 
         # 1. Checar se já existe no cache
-        if self.cache_manager.has_cached_stems(file_hash, mode):
-            if progress_callback:
-                progress_callback(1.0, "Carregando stems do cache ultra-rápido...")
-            cached_stems = self.cache_manager.load_stems(file_hash, mode)
-            if cached_stems:
-                track_list: List[StemTrack] = []
-                for name, data in cached_stems.items():
-                    defn = STEM_DEFINITIONS.get(name, {
-                        "display_name": name.capitalize(),
-                        "color_hex": "#4A90E2",
-                        "is_lfe_candidate": False,
-                        "is_ceiling_candidate": False,
-                    })
-                    track_list.append(StemTrack(
-                        name=name,
-                        display_name=defn.get("display_name", name),
-                        color_hex=defn.get("color_hex", "#4A90E2"),
-                        audio_data=data,
-                        sample_rate=sample_rate,
-                        is_lfe_candidate=defn.get("is_lfe_candidate", False),
-                        is_ceiling_candidate=defn.get("is_ceiling_candidate", False),
-                        initial_pan_x=defn.get("initial_pan_x", 0.0),
-                        initial_pan_y=defn.get("initial_pan_y", 0.0),
-                        initial_pan_z=defn.get("initial_pan_z", 0.0),
-                        initial_spread=defn.get("initial_spread", 0.2),
-                        initial_lfe_send=defn.get("initial_lfe_send", 0.0),
-                    ))
-                return SeparationResult(
-                    stems=track_list,
-                    mode=mode,
-                    file_hash=file_hash,
-                    elapsed_time_s=time.time() - t0,
-                    from_cache=True
-                )
-
-        apply_process_shield(reserve_cores=2)
+        cached = self.load_cached_result(file_hash, mode)
+        if cached:
+            return cached
+        if mode not in ("fast", "surgical"):
+            raise ValueError("Modo de separação desconhecido.")
 
         if cancel_check and cancel_check():
             raise InterruptedError("Separação cancelada pelo usuário.")
 
-        # 2. Executar Estágio 1: Macro-Camadas via Demucs com Chunking Seguro
+        # 2. Inferência local com o segmento nativo do modelo.
         if progress_callback:
-            progress_callback(0.1, "Iniciando Demucs em CPU (Afinidade núcleos 2-15)...")
-
+            progress_callback(0.15, "Preparando o modelo Demucs em CPU…")
         model = self._ensure_demucs_model()
         import torch
         from demucs.apply import apply_model
@@ -290,23 +320,37 @@ class DeepStemEngine:
         # Se a taxa for superior a 48 kHz (ex: 96 kHz Hi-Res), downsample para 44.1 kHz para economizar 50% de RAM e CPU
         orig_sr = sample_rate
         demucs_sr = model.samplerate
-        arr_for_demucs = audio_array
-        if orig_sr != demucs_sr:
-            import librosa
-            arr_for_demucs = librosa.resample(arr_for_demucs.T, orig_sr=orig_sr, target_sr=demucs_sr).T
+        arr_for_demucs = _resample(audio_array, orig_sr, demucs_sr)
+        tensor_in = torch.from_numpy(np.ascontiguousarray(arr_for_demucs.T, dtype=np.float32)).unsqueeze(0)
 
-        tensor_in = torch.tensor(arr_for_demucs.T, dtype=torch.float32).unsqueeze(0)
-
-        if progress_callback:
-            progress_callback(0.25, "Inferência neural segmentada (baixo consumo de RAM)...")
-
-        # Configurações de otimização de hardware no Xeon:
-        # segment=None: permite que o Demucs htdemucs utilize seu segment nativo (7.8s),
-        # evitando incompatibilidade dimensional no reshape de tensores da arquitetura BagOfModels.
-        # shifts=0 no fast, shifts=1 no surgical (evita reprocessamento desnecessário)
-        shifts_val = 0 if mode == "fast" else 1
+        shifts_val = 0
         segment_val = None
         overlap_val = 0.25
+        sub_models = getattr(model, "models", (model,))
+        total_chunks = 0
+        for sub_model in sub_models:
+            seg = float(segment_val if segment_val is not None else getattr(sub_model, "segment", 7.8))
+            seg_len = int(demucs_sr * seg)
+            stride = int((1 - overlap_val) * seg_len)
+            total_chunks += len(range(0, tensor_in.shape[-1], stride))
+        completed = 0
+        inference_started = time.monotonic()
+
+        def on_chunk(event: dict) -> None:
+            nonlocal completed
+            if cancel_check and cancel_check():
+                raise InterruptedError("Separação cancelada pelo usuário.")
+            if event.get("state") == "end" and progress_callback:
+                completed += 1
+                elapsed = time.monotonic() - inference_started
+                remaining = math.ceil(elapsed * (total_chunks - completed) / completed)
+                minutes, seconds = divmod(remaining, 60)
+                eta = f"{minutes} min {seconds:02d} s" if minutes else f"{seconds} s"
+                ratio = completed / total_chunks
+                progress_callback(
+                    0.70 if completed == total_chunks else 0.15 + 0.55 * ratio,
+                    f"Separando faixas neurais: trecho {completed}/{total_chunks} ({ratio:.0%}) — restante: {eta}",
+                )
 
         with torch.no_grad():
             sources = apply_model(
@@ -318,93 +362,31 @@ class DeepStemEngine:
                 overlap=overlap_val,
                 device="cpu",
                 progress=False,
-                num_workers=0
+                num_workers=0,
+                callback=on_chunk if progress_callback or cancel_check else None,
             )[0]
 
         if cancel_check and cancel_check():
             raise InterruptedError("Separação cancelada pelo usuário.")
 
         # Extração das 4 macro-camadas [drums, bass, other, vocals]
+        if progress_callback:
+            message = ("Subdividindo camadas acústicas 7.1.4 (DSP Cirúrgico)…" if mode == "surgical"
+                       else "Preparando as quatro faixas separadas…")
+            progress_callback(0.78, message)
         source_names = model.sources
         macro_stems: Dict[str, np.ndarray] = {}
         for idx, src_name in enumerate(source_names):
             stem_audio = sources[idx].numpy().T
-            if orig_sr != demucs_sr:
-                import librosa
-                stem_audio = librosa.resample(stem_audio.T, orig_sr=demucs_sr, target_sr=orig_sr).T
-            macro_stems[src_name] = stem_audio.astype(np.float32)
-
-        stems_dict: Dict[str, np.ndarray] = {}
-
-        if mode == "fast":
-            stems_dict = macro_stems
-        else:
-            # 3. Estágio 2: Sub-divisão cirúrgica DSP de alta resolução
-            if progress_callback:
-                progress_callback(0.70, "Executando sub-divisão cirúrgica DSP de instrumentos...")
-
-            # --- A. BATERIA / PERCUSSÃO (drums) ---
-            drums = macro_stems.get("drums", np.zeros_like(audio_array))
-            sos_kick = signal.butter(4, 120.0, btype="lowpass", fs=orig_sr, output="sos")
-            sos_above_kick = signal.butter(4, 120.0, btype="highpass", fs=orig_sr, output="sos")
-            kick = signal.sosfiltfilt(sos_kick, drums, axis=0)
-            drums_midhigh = signal.sosfiltfilt(sos_above_kick, drums, axis=0)
-
-            sos_cym = signal.butter(4, 5000.0, btype="highpass", fs=orig_sr, output="sos")
-            sos_snare = signal.butter(4, 5000.0, btype="lowpass", fs=orig_sr, output="sos")
-            cymbals_hihat = signal.sosfiltfilt(sos_cym, drums_midhigh, axis=0)
-            snare = signal.sosfiltfilt(sos_snare, drums_midhigh, axis=0)
-
-            stems_dict["kick"] = kick
-            stems_dict["snare"] = snare
-            stems_dict["cymbals_hihat"] = cymbals_hihat
-
-            # --- B. GRAVE / BAIXO (bass) ---
-            bass = macro_stems.get("bass", np.zeros_like(audio_array))
-            # Crossover Linkwitz-Riley 4th order em 80 Hz (< 80 Hz = LFE puro)
-            sos_lfe = signal.butter(4, 80.0, btype="lowpass", fs=orig_sr, output="sos")
-            sos_melodic = signal.butter(4, 80.0, btype="highpass", fs=orig_sr, output="sos")
-            sub_bass_lfe = signal.sosfiltfilt(sos_lfe, bass, axis=0)
-            melodic_bass = signal.sosfiltfilt(sos_melodic, bass, axis=0)
-
-            stems_dict["sub_bass_lfe"] = sub_bass_lfe
-            stems_dict["melodic_bass"] = melodic_bass
-
-            # --- C. VOZES (vocals) ---
-            vocals = macro_stems.get("vocals", np.zeros_like(audio_array))
-            # Isolamento coerente em fase para Lead Vocal (centro) e Backing Vocals (estéreo envolvente)
-            mid = 0.5 * (vocals[:, 0] + vocals[:, 1])
-            lead_vocal = np.column_stack([mid, mid])
-
-            # Backing vocals: extração estéreo pura SEM inversão de polaridade (proibido [+side, -side])
-            # Subtrai a maior parte do centro comum (85%), isolando backing vocals, harmonias e reverbs
-            side_l = vocals[:, 0] - 0.85 * mid
-            side_r = vocals[:, 1] - 0.85 * mid
-            # Filtro passa-altas Linkwitz/Butterworth de 4ª ordem em 180 Hz para eliminar vazamento sub-grave
-            sos_vocal_hp = signal.butter(4, 180.0, btype="highpass", fs=orig_sr, output="sos")
-            backing_l = signal.sosfiltfilt(sos_vocal_hp, side_l)
-            backing_r = signal.sosfiltfilt(sos_vocal_hp, side_r)
-            backing_vocals = np.column_stack([backing_l, backing_r])
-
-            stems_dict["lead_vocal"] = lead_vocal
-            stems_dict["backing_vocals"] = backing_vocals
-
-            # --- D. OUTROS / HARMONIA (other) ---
-            other = macro_stems.get("other", np.zeros_like(audio_array))
-            sos_air = signal.butter(4, 6000.0, btype="highpass", fs=orig_sr, output="sos")
-            sos_body = signal.butter(4, 6000.0, btype="lowpass", fs=orig_sr, output="sos")
-            air_ambience = signal.sosfiltfilt(sos_air, other, axis=0)
-            guitar_keys = signal.sosfiltfilt(sos_body, other, axis=0)
-
-            stems_dict["guitar_keys"] = guitar_keys
-            stems_dict["air_ambience"] = air_ambience
+            macro_stems[src_name] = _resample(stem_audio, demucs_sr, orig_sr)[:len(audio_array)]
+        stems_dict = macro_stems if mode == "fast" else split_surgical(macro_stems, orig_sr)
 
         if cancel_check and cancel_check():
             raise InterruptedError("Separação cancelada pelo usuário.")
 
         # 4. Salvar no cache para reutilização instantânea
         if progress_callback:
-            progress_callback(0.90, "Gravando stems no cache local...")
+            progress_callback(0.84, "Gravando stems no cache de alta performance…")
 
         self.cache_manager.save_stems(
             file_hash=file_hash,
@@ -414,28 +396,7 @@ class DeepStemEngine:
             sample_rate=orig_sr
         )
 
-        track_list: List[StemTrack] = []
-        for name, data in stems_dict.items():
-            defn = STEM_DEFINITIONS.get(name, {
-                "display_name": name.capitalize(),
-                "color_hex": "#4A90E2",
-                "is_lfe_candidate": False,
-                "is_ceiling_candidate": False,
-            })
-            track_list.append(StemTrack(
-                name=name,
-                display_name=defn.get("display_name", name),
-                color_hex=defn.get("color_hex", "#4A90E2"),
-                audio_data=data,
-                sample_rate=orig_sr,
-                is_lfe_candidate=defn.get("is_lfe_candidate", False),
-                is_ceiling_candidate=defn.get("is_ceiling_candidate", False),
-                initial_pan_x=defn.get("initial_pan_x", 0.0),
-                initial_pan_y=defn.get("initial_pan_y", 0.0),
-                initial_pan_z=defn.get("initial_pan_z", 0.0),
-                initial_spread=defn.get("initial_spread", 0.2),
-                initial_lfe_send=defn.get("initial_lfe_send", 0.0),
-            ))
+        track_list = _tracks(stems_dict, orig_sr)
 
         if progress_callback:
             progress_callback(1.0, "Separação concluída com sucesso.")

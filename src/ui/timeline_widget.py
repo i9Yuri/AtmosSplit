@@ -2,8 +2,7 @@
 AtmosSplit — Spatial Timeline Widget (Automação Visual Profissional por Trechos)
 Linha do tempo gráfica estilo DAW para automação espacial 7.1.4 Dolby Atmos.
 Permite divisão rápida (split) no cursor, ajuste tátil de bordas por arraste (boundary dragging),
-zoom milimétrico com régua adaptativa até escala de milissegundos, mini-mapa de navegação (bird's eye)
-e acionamento com 1 clique do IA Maestro (arranjo musical autônomo).
+zoom com régua adaptativa, mini-mapa e ajuste opcional à cabeça dos compassos.
 Zero scrollbars do SO cobrindo os blocos e zero pop-ups modais intrusivos.
 """
 
@@ -12,7 +11,9 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QEvent
+from bisect import bisect_left, bisect_right
+
+from PySide6.QtCore import Qt, QRectF, QPointF, QSignalBlocker, Signal
 from PySide6.QtGui import (
     QPainter,
     QColor,
@@ -20,7 +21,6 @@ from PySide6.QtGui import (
     QBrush,
     QFont,
     QMouseEvent,
-    QCursor,
     QPainterPath,
 )
 from PySide6.QtWidgets import (
@@ -30,10 +30,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLabel,
     QInputDialog,
-    QFrame,
+    QSizePolicy,
 )
 
-from ..spatial.timeline_manager import SpatialTimelineManager, SpatialSection
+from ..spatial.timeline_manager import SpatialTimelineManager
+from . import theme as T
+from .micro_event_lane import LANE_COLORS, LANE_HELP, MicroEventLane
 
 
 class TimelineTrackCanvas(QWidget):
@@ -48,15 +50,23 @@ class TimelineTrackCanvas(QWidget):
     seek_clicked = Signal(float)
     boundary_adjusted = Signal(int, float)
 
-    RULER_HEIGHT = 22
+    RULER_HEIGHT = 25
     TRACK_HEIGHT = 46
+    MICRO_Y = RULER_HEIGHT + TRACK_HEIGHT + 2
     MINIMAP_HEIGHT = 14
-    TOTAL_CANVAS_HEIGHT = 86
+    MINIMAP_Y = MICRO_Y + MicroEventLane.HEIGHT + 1
+    TOTAL_CANVAS_HEIGHT = MINIMAP_Y + MINIMAP_HEIGHT + 1
 
     def __init__(self, timeline_manager: SpatialTimelineManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.timeline_manager = timeline_manager
         self.current_time_s: float = 0.0
+        self.has_session = True
+        self.snap_to_bars = False
+        self._downbeats: tuple[float, ...] = ()
+        self.setAccessibleName("Régua, trechos e compassos")
+        self.micro_lane = MicroEventLane(self)
+        self.micro_lane.seek_requested.connect(self.seek_clicked)
 
         # Viewport virtual
         self._zoom: float = 1.0
@@ -85,7 +95,7 @@ class TimelineTrackCanvas(QWidget):
 
     @property
     def visible_duration_s(self) -> float:
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         return max(0.01, tot / self._zoom)
 
     @property
@@ -94,7 +104,7 @@ class TimelineTrackCanvas(QWidget):
 
     def set_view(self, zoom: float, view_start_s: float):
         self._zoom = max(1.0, min(128.0, float(zoom)))
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         vis = tot / self._zoom
         max_start = max(0.0, tot - vis)
         self.view_start_s = max(0.0, min(max_start, float(view_start_s)))
@@ -107,7 +117,7 @@ class TimelineTrackCanvas(QWidget):
             return
 
         w = max(1, self.width())
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         target_x = w / 2.0 if anchor_x is None else float(anchor_x)
 
         # Tempo no ponto de ancoragem antes do zoom
@@ -127,6 +137,11 @@ class TimelineTrackCanvas(QWidget):
         if abs(self.current_time_s - time_s) > 0.01:
             self.current_time_s = max(0.0, float(time_s))
             self.update()
+            self.micro_lane.update()
+
+    def resizeEvent(self, event):
+        self.micro_lane.setGeometry(0, self.MICRO_Y, self.width(), self.micro_lane.HEIGHT)
+        super().resizeEvent(event)
 
     # --- Funções de Projeção de Coordenadas ---
     def time_to_x(self, t: float) -> float:
@@ -137,18 +152,18 @@ class TimelineTrackCanvas(QWidget):
     def x_to_time(self, x: float) -> float:
         w = max(1, self.width())
         vis = self.visible_duration_s
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         t = self.view_start_s + (float(x) / w) * vis
         return max(0.0, min(tot, t))
 
     def time_to_mini_x(self, t: float) -> float:
         w = max(1, self.width())
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         return float(t) * (w / tot)
 
     def mini_x_to_time(self, x: float) -> float:
         w = max(1, self.width())
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         return max(0.0, min(tot, (float(x) / w) * tot))
 
     @staticmethod
@@ -185,39 +200,71 @@ class TimelineTrackCanvas(QWidget):
         else:
             return f"{m:02d}:{s:06.3f}"
 
+    def refresh_grid(self) -> None:
+        self._downbeats = tuple(sorted({t for section in self.timeline_manager.sections
+                                       for t in section.downbeats_s}))
+        self.micro_lane.set_sections(self.timeline_manager.sections)
+        self.micro_lane.setVisible(self.has_session)
+
+    def snap_time(self, time_s: float) -> float:
+        if not self.snap_to_bars or not self._downbeats:
+            return time_s
+        i = bisect_left(self._downbeats, time_s)
+        candidates = self._downbeats[max(0, i-1):i+1]
+        return min(candidates, key=lambda beat: abs(beat-time_s)) if candidates else time_s
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        if not self.has_session:
+            painter.setPen(QPen(QColor(T.LINE), 1))
+            painter.setBrush(QColor(T.CANVAS))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 10, 10)
+            painter.setPen(QColor(T.SECONDARY))
+            painter.drawText(self.rect().adjusted(16, 0, -16, 0), Qt.AlignCenter,
+                             "Os trechos, compassos e microeventos aparecem após a análise.")
+            painter.end()
+            return
 
         w = self.width()
         h = self.height()
-        tot_d = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot_d = max(0.001, float(self.timeline_manager.total_duration_s))
         vis_d = self.visible_duration_s
 
         # Fundo mestre estilo DAW
-        painter.fillRect(0, 0, w, h, QColor("#101318"))
+        painter.fillRect(0, 0, w, h, QColor(T.CANVAS))
 
         # --- 1. RÉGUA TEMPORAL (RULER: y=0 a y=22) ---
         ruler_h = self.RULER_HEIGHT
-        painter.fillRect(0, 0, w, ruler_h, QColor("#151821"))
-        painter.setPen(QPen(QColor("#262C38"), 1))
+        painter.fillRect(0, 0, w, ruler_h, QColor(T.PANEL))
+        painter.setPen(QPen(QColor(T.GRID), 1))
         painter.drawLine(0, ruler_h, w, ruler_h)
 
         step = self._ruler_step(vis_d)
+        while step * w / max(0.001, vis_d) < 62:
+            step *= 2
         tick_start = math.floor(self.view_start_s / step) * step
         tick_end = min(tot_d, self.view_start_s + vis_d)
 
-        painter.setFont(QFont("monospace", 8))
+        painter.setFont(QFont(T.MONO, 9))
         cur_tick = tick_start
         while cur_tick <= tick_end + 1e-4:
             tx = self.time_to_x(cur_tick)
             if 0 <= tx <= w:
-                painter.setPen(QPen(QColor("#718096"), 1))
+                painter.setPen(QPen(QColor(T.SECONDARY), 1))
                 painter.drawLine(int(tx), ruler_h - 7, int(tx), ruler_h)
-                # Submarcações menores se passo for grande
                 painter.drawText(QPointF(tx + 4, ruler_h - 8), self._format_time(cur_tick, step))
+                painter.setPen(QPen(QColor(T.GRID), 1))
+                painter.drawLine(int(tx), ruler_h + 1, int(tx), ruler_h + self.TRACK_HEIGHT)
             cur_tick += step
 
+        left = bisect_left(self._downbeats, self.view_start_s)
+        right = bisect_right(self._downbeats, tick_end)
+        stride = max(1, (right - left) // max(1, w // 9))
+        painter.setPen(QPen(QColor(T.WARM), 1))
+        for bar in self._downbeats[left:right:stride]:
+            bx = int(self.time_to_x(bar))
+            painter.drawLine(bx, ruler_h - 4, bx, ruler_h)
         # --- 2. TRILHA DE SEÇÕES (TRACK: y=23 a y=68) ---
         track_y = self.RULER_HEIGHT + 1
         track_h = self.TRACK_HEIGHT
@@ -225,7 +272,7 @@ class TimelineTrackCanvas(QWidget):
         active_edit_id = self.timeline_manager.active_edit_section_id
 
         # Linha inferior da trilha
-        painter.setPen(QPen(QColor("#202530"), 1))
+        painter.setPen(QPen(QColor(T.GRID), 1))
         painter.drawLine(0, track_y + track_h, w, track_y + track_h)
 
         for sec in sections:
@@ -242,45 +289,35 @@ class TimelineTrackCanvas(QWidget):
             is_active = (sec.id == active_edit_id)
             is_hovered = (sec.id == self.hovered_section_id)
 
-            base_color = QColor(sec.color_hex if sec.color_hex else "#4299E1")
-            alpha = 190 if is_active else (130 if is_hovered else 80)
-            fill_color = QColor(base_color.red(), base_color.green(), base_color.blue(), alpha)
-
-            # Preencher bloco com cantos ligeiramente arredondados
-            painter.setBrush(QBrush(fill_color))
+            base_color = QColor(sec.color_hex if sec.color_hex else T.ACCENT)
+            painter.setBrush(QColor(T.RAISED if is_active or is_hovered else T.PANEL_ALT))
             if is_active:
-                painter.setPen(QPen(QColor("#00E5FF"), 2))
+                painter.setPen(QPen(QColor(T.ACCENT), 2))
             elif is_hovered:
-                painter.setPen(QPen(QColor("#63B3ED"), 1.5))
+                painter.setPen(QPen(QColor(T.ACCENT), 1.5))
             else:
-                painter.setPen(QPen(QColor("#2D3748"), 1))
+                painter.setPen(QPen(QColor(T.LINE), 1))
 
-            painter.drawRoundedRect(block_rect, 4, 4)
-
-            # Barra de destaque superior no bloco ativo
-            if is_active:
-                top_strip = QRectF(block_rect.left(), block_rect.top(), block_rect.width(), 3)
-                painter.fillRect(top_strip, QColor("#00E5FF"))
+            painter.drawRoundedRect(block_rect, 6, 6)
+            if block_w > 18:
+                strip = QRectF(block_rect.left() + 4, block_rect.top() + 8, 3, block_rect.height() - 16)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(T.ACCENT) if is_active else base_color)
+                painter.drawRoundedRect(strip, 1.5, 1.5)
 
             # Rótulo de texto do trecho
             if block_w > 36:
-                painter.setFont(QFont("sans-serif", 9, QFont.Bold if is_active else QFont.Normal))
-                painter.setPen(QPen(QColor("#FFFFFF" if is_active else "#E2E8F0")))
+                painter.setFont(QFont(T.BODY, 9, QFont.Bold if is_active else QFont.Normal))
+                painter.setPen(QColor(T.INK))
 
                 label_text = sec.name
                 if block_w > 120:
                     dur_s = sec.end_time_s - sec.start_time_s
-                    label_text = f"{sec.name} ({dur_s:.1f}s)"
+                    label_text = f"{sec.name}   {dur_s:.1f} s"
 
-                # Clipar texto para não vazar
-                painter.save()
-                painter.setClipRect(block_rect.adjusted(6, 4, -6, -4))
-                painter.drawText(
-                    block_rect.adjusted(6, 4, -6, -4),
-                    Qt.AlignLeft | Qt.AlignVCenter,
-                    label_text
-                )
-                painter.restore()
+                text_rect = block_rect.adjusted(13, 4, -6, -4)
+                label_text = painter.fontMetrics().elidedText(label_text, Qt.ElideRight, int(text_rect.width()))
+                painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, label_text)
 
         # Desenhar linhas de fronteira arrastáveis (Boundary handles)
         for idx in range(len(sections) - 1):
@@ -291,13 +328,13 @@ class TimelineTrackCanvas(QWidget):
                 is_b_hover = (self.hovered_boundary_idx == idx)
 
                 if is_dragged:
-                    b_color = QColor("#00E5FF")
+                    b_color = QColor(T.ACCENT)
                     b_width = 3
                 elif is_b_hover:
-                    b_color = QColor("#ECC94B")
+                    b_color = QColor(T.WARM)
                     b_width = 2
                 else:
-                    b_color = QColor("#4A5568")
+                    b_color = QColor(T.LINE)
                     b_width = 1
 
                 painter.setPen(QPen(b_color, b_width, Qt.DashLine if not (is_dragged or is_b_hover) else Qt.SolidLine))
@@ -313,7 +350,7 @@ class TimelineTrackCanvas(QWidget):
         px = self.time_to_x(self.current_time_s)
         if 0 <= px <= w:
             # Marcador triangular na régua
-            painter.setBrush(QBrush(QColor("#00E5FF")))
+            painter.setBrush(QBrush(QColor(T.WARM)))
             painter.setPen(Qt.NoPen)
             tri = QPainterPath()
             tri.moveTo(px - 5, 0)
@@ -323,14 +360,14 @@ class TimelineTrackCanvas(QWidget):
             painter.drawPath(tri)
 
             # Linha vertical brilhante descendo até o final da trilha
-            painter.setPen(QPen(QColor("#00E5FF"), 1.8))
+            painter.setPen(QPen(QColor(T.WARM), 1.8))
             painter.drawLine(int(px), ruler_h - 2, int(px), track_y + track_h)
 
-        # --- 4. MINI-MAPA DE VISÃO GERAL INTEGRADO (y=71 a y=85) ---
-        mini_y = track_y + track_h + 2
+        # Mini-mapa sob a trilha de microeventos.
+        mini_y = self.MINIMAP_Y
         mini_h = self.MINIMAP_HEIGHT
-        painter.fillRect(0, mini_y, w, mini_h, QColor("#0A0C10"))
-        painter.setPen(QPen(QColor("#1A202C"), 1))
+        painter.fillRect(0, mini_y, w, mini_h, QColor(T.CANVAS))
+        painter.setPen(QPen(QColor(T.PANEL_ALT), 1))
         painter.drawRect(0, mini_y, w - 1, mini_h - 1)
 
         # Desenhar faixas de todas as seções no mini-mapa
@@ -338,8 +375,8 @@ class TimelineTrackCanvas(QWidget):
             mx1 = self.time_to_mini_x(sec.start_time_s)
             mx2 = self.time_to_mini_x(sec.end_time_s)
             mw = max(2.0, mx2 - mx1)
-            b_col = QColor(sec.color_hex if sec.color_hex else "#4299E1")
-            painter.fillRect(QRectF(mx1, mini_y + 1, mw, mini_h - 2), QColor(b_col.red(), b_col.green(), b_col.blue(), 100))
+            b_col = QColor(sec.color_hex if sec.color_hex else T.ACCENT)
+            painter.fillRect(QRectF(mx1, mini_y + 2, mw, mini_h - 4), T.tint(b_col, 100))
 
         # Viewport visível no mini-mapa
         vx1 = self.time_to_mini_x(self.view_start_s)
@@ -347,14 +384,14 @@ class TimelineTrackCanvas(QWidget):
         vw = max(6.0, vx2 - vx1)
         viewport_rect = QRectF(vx1, mini_y, vw, mini_h)
 
-        painter.setBrush(QBrush(QColor(0, 229, 255, 35)))
-        painter.setPen(QPen(QColor("#00E5FF"), 1.5))
+        painter.setBrush(QBrush(T.tint(T.ACCENT, 25)))
+        painter.setPen(QPen(QColor(T.ACCENT), 1.5))
         painter.drawRect(viewport_rect)
 
         # Mini agulha do playhead no mini-mapa
         mpx = self.time_to_mini_x(self.current_time_s)
         if 0 <= mpx <= w:
-            painter.setPen(QPen(QColor("#ECC94B"), 1.5))
+            painter.setPen(QPen(QColor(T.WARM), 1.5))
             painter.drawLine(int(mpx), mini_y, int(mpx), mini_y + mini_h)
 
     # --- Tratamento de Eventos do Mouse ---
@@ -376,12 +413,12 @@ class TimelineTrackCanvas(QWidget):
             self.seek_clicked.emit(seek_t)
             return
 
-        # 2. Clique no Mini-Mapa (y >= 71) -> Posicionar viewport
-        if y >= (self.RULER_HEIGHT + self.TRACK_HEIGHT + 2):
+        # Clique no mini-mapa posiciona o viewport.
+        if y >= self.MINIMAP_Y:
             self.is_dragging_minimap = True
             target_t = self.mini_x_to_time(x)
             new_start = target_t - self.visible_duration_s / 2.0
-            tot = max(1.0, float(self.timeline_manager.total_duration_s))
+            tot = max(0.001, float(self.timeline_manager.total_duration_s))
             max_start = max(0.0, tot - self.visible_duration_s)
             self.view_start_s = max(0.0, min(max_start, new_start))
             self.update()
@@ -417,7 +454,7 @@ class TimelineTrackCanvas(QWidget):
 
         # Arraste de fronteira temporal
         if self.is_dragging_boundary and self.drag_boundary_idx >= 0:
-            new_t = self.x_to_time(x)
+            new_t = self.snap_time(self.x_to_time(x))
             if self.timeline_manager.adjust_boundary(self.drag_boundary_idx, new_t):
                 self.update()
                 self.boundary_adjusted.emit(self.drag_boundary_idx, new_t)
@@ -427,14 +464,14 @@ class TimelineTrackCanvas(QWidget):
         if self.is_dragging_minimap:
             target_t = self.mini_x_to_time(x)
             new_start = target_t - self.visible_duration_s / 2.0
-            tot = max(1.0, float(self.timeline_manager.total_duration_s))
+            tot = max(0.001, float(self.timeline_manager.total_duration_s))
             max_start = max(0.0, tot - self.visible_duration_s)
             self.view_start_s = max(0.0, min(max_start, new_start))
             self.update()
             return
 
         # Hover states
-        if y >= (self.RULER_HEIGHT + self.TRACK_HEIGHT + 2):
+        if y >= self.MICRO_Y:
             self.setCursor(Qt.PointingHandCursor)
             self.hovered_boundary_idx = None
             self.hovered_section_id = None
@@ -465,6 +502,8 @@ class TimelineTrackCanvas(QWidget):
         self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if not self.RULER_HEIGHT < event.position().y() < self.MICRO_Y:
+            return
         x = event.position().x()
         s_id = self._hit_test_section(x)
         if s_id:
@@ -481,7 +520,7 @@ class TimelineTrackCanvas(QWidget):
 
         # Wheel normal ou Shift + Wheel: Pan horizontal da timeline
         delta = event.angleDelta().x() if event.angleDelta().x() != 0 else event.angleDelta().y()
-        tot = max(1.0, float(self.timeline_manager.total_duration_s))
+        tot = max(0.001, float(self.timeline_manager.total_duration_s))
         pan_amount = (self.visible_duration_s * 0.15) * (-1.0 if delta > 0 else 1.0)
         max_start = max(0.0, tot - self.visible_duration_s)
         self.view_start_s = max(0.0, min(max_start, self.view_start_s + pan_amount))
@@ -509,103 +548,89 @@ class TimelineTrackCanvas(QWidget):
 class TimelineWidget(QWidget):
     """
     Widget completo da linha do tempo estilo DAW profissional.
-    Integra controles de Trechos, botão do IA Maestro, zoom adaptativo,
-    divisão sem pop-ups bloqueantes e navegação com zero obstrução.
+    Exibe família, confiança e andamento da seção junto à régua de edição.
     """
     section_selected = Signal(str)
     split_requested = Signal(float)
     section_renamed = Signal(str, str)
     section_removed = Signal(str)
+    timeline_edited = Signal()
     seek_requested = Signal(float)
-    reanalyze_requested = Signal()
+    micro_toggled = Signal(bool)
 
     def __init__(self, timeline_manager: SpatialTimelineManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("Timeline")
         self.timeline_manager = timeline_manager
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(14, 7, 14, 7)
+        layout.setSpacing(5)
 
-        # Barra superior com título, badge do trecho e botões de ação rápida
         bar_header = QHBoxLayout()
         bar_header.setSpacing(6)
-
-        title = QLabel("AUTOMAÇÃO ESPACIAL POR TRECHOS")
-        title.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E5FF; letter-spacing: 0.5px;")
+        title = QLabel("Linha do tempo")
+        title.setObjectName("Heading")
         bar_header.addWidget(title)
-
-        self.lbl_active_info = QLabel("")
-        self.lbl_active_info.setStyleSheet("font-size: 11px; color: #A0AEC0;")
-        bar_header.addWidget(self.lbl_active_info)
-
-        bar_header.addStretch()
-
-        # Botão ✨ IA Maestro (Arranjo Musical Autônomo de Estúdio)
-        self.btn_maestro = QPushButton("✨ IA Maestro")
-        self.btn_maestro.setToolTip(
-            "Analisa automaticamente a estrutura musical da faixa (intro, versos, build-ups, refrão e final)\n"
-            "e aplica arranjo de estúdio Dolby Atmos 7.1.4 com vozes dinâmicas e envolvimento 360°."
-        )
-        self.btn_maestro.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1A365D, stop:1 #2B6CB0);
-                color: #FFFFFF;
-                border: 1px solid #4299E1;
-                border-radius: 4px;
-                padding: 4px 10px;
-                font-size: 11px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2B6CB0, stop:1 #3182CE);
-                border: 1px solid #63B3ED;
-            }
-        """)
-        self.btn_maestro.clicked.connect(self.reanalyze_requested.emit)
-        bar_header.addWidget(self.btn_maestro)
-
-        # Botão Dividir no cursor (Split)
-        self.btn_split = QPushButton("Dividir no Tempo Atual")
-        self.btn_split.setObjectName("BtnPrimary")
-        self.btn_split.setToolTip("Divide o trecho na posição atual do cursor de reprodução (Zero pop-ups).")
+        self.lbl_active_info = QLabel()
+        self.lbl_active_info.setObjectName("SectionInfo")
+        self.lbl_active_info.setTextFormat(Qt.PlainText)
+        self.lbl_active_info.setMinimumWidth(35)
+        self.lbl_active_info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bar_header.addWidget(self.lbl_active_info, 1)
+        self.btn_micro = QPushButton("Microcoreografia")
+        self.btn_micro.setCheckable(True)
+        self.btn_micro.setChecked(True)
+        self.btn_micro.setAccessibleName("Aplicar microcoreografia ao monitor e à exportação")
+        self.btn_micro.toggled.connect(self.micro_toggled)
+        bar_header.addWidget(self.btn_micro)
+        self.btn_snap = QPushButton("Compasso")
+        self.btn_snap.setCheckable(True)
+        self.btn_snap.setToolTip("Ajustar divisão e arraste à cabeça de compasso mais próxima")
+        self.btn_snap.toggled.connect(self._snap_changed)
+        bar_header.addWidget(self.btn_snap)
+        self.btn_split = QPushButton("Dividir")
+        self.btn_split.setToolTip("Dividir na posição do cursor")
         self.btn_split.clicked.connect(self._on_split_clicked)
         bar_header.addWidget(self.btn_split)
-
-        # Botão Renomear
         self.btn_rename = QPushButton("Renomear")
-        self.btn_rename.setToolTip("Altera o nome do trecho selecionado (ex: Refrão, Verso 1, Ponte).")
         self.btn_rename.clicked.connect(self._on_rename_clicked)
         bar_header.addWidget(self.btn_rename)
-
-        # Botão Excluir
-        self.btn_delete = QPushButton("Excluir")
-        self.btn_delete.setToolTip("Remove o trecho selecionado fundindo seu tempo com o trecho vizinho.")
+        self.btn_delete = QPushButton("Fundir")
+        self.btn_delete.setToolTip("Fundir este trecho com o vizinho")
         self.btn_delete.clicked.connect(self._on_delete_clicked)
         bar_header.addWidget(self.btn_delete)
-
-        # Controles de Zoom
-        self.btn_zoom_out = QPushButton("-")
-        self.btn_zoom_out.setFixedWidth(24)
-        self.btn_zoom_out.setToolTip("Diminuir zoom (ver faixa mais ampla)")
-        self.btn_zoom_out.clicked.connect(lambda: self._set_zoom(self.zoom / 1.5))
-        bar_header.addWidget(self.btn_zoom_out)
-
+        self.btn_zoom_out = QPushButton("−")
         self.btn_zoom_in = QPushButton("+")
-        self.btn_zoom_in.setFixedWidth(24)
-        self.btn_zoom_in.setToolTip("Aumentar zoom (precisão até milissegundos)")
+        self.btn_zoom_reset = QPushButton("Enquadrar")
+        self.btn_zoom_out.setAccessibleName("Diminuir zoom")
+        self.btn_zoom_in.setAccessibleName("Aumentar zoom")
+        self.btn_zoom_out.clicked.connect(lambda: self._set_zoom(self.zoom / 1.5))
         self.btn_zoom_in.clicked.connect(lambda: self._set_zoom(self.zoom * 1.5))
-        bar_header.addWidget(self.btn_zoom_in)
-
-        self.btn_zoom_reset = QPushButton("100%")
-        self.btn_zoom_reset.setToolTip("Redefinir zoom para visualização completa da música")
-        self.btn_zoom_reset.clicked.connect(lambda: self._set_zoom(1.0))
-        bar_header.addWidget(self.btn_zoom_reset)
-
+        self.btn_zoom_reset.clicked.connect(lambda: self.canvas.set_view(1.0, 0.0))
+        bar_header.addSpacing(8)
+        for button in (self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_reset):
+            bar_header.addWidget(button)
+        for button in (self.btn_micro, self.btn_snap, self.btn_split, self.btn_rename,
+                       self.btn_delete, self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_reset):
+            button.setProperty("compact", True)
         layout.addLayout(bar_header)
+        self.lbl_features = QLabel()
+        self.lbl_features.setObjectName("Subtle")
+        self.lbl_features.setTextFormat(Qt.PlainText)
+        self.lbl_features.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        detail_row = QHBoxLayout()
+        detail_row.addWidget(self.lbl_features, 1)
+        self.micro_legend = QLabel()
+        self.micro_legend.setTextFormat(Qt.RichText)
+        self.micro_legend.setToolTip(LANE_HELP)
+        self.micro_legend.setAccessibleName("Linhas de marcadores de cima para baixo")
+        detail_row.addWidget(self.micro_legend)
+        layout.addLayout(detail_row)
 
         # Canvas gráfico profissional (Zero QScrollArea para eliminar bugs de escala e sobreposição)
         self.canvas = TimelineTrackCanvas(self.timeline_manager)
+        self.canvas.refresh_grid()
         self.canvas.section_clicked.connect(self._on_section_clicked)
         self.canvas.section_double_clicked.connect(self._on_rename_clicked)
         self.canvas.seek_clicked.connect(self.seek_requested)
@@ -614,6 +639,9 @@ class TimelineWidget(QWidget):
 
         self.setFocusPolicy(Qt.StrongFocus)
         self._refresh_status_labels()
+
+    def _snap_changed(self, checked: bool) -> None:
+        self.canvas.snap_to_bars = checked
 
     def set_current_playback_time(self, time_s: float):
         """Atualiza a posição do cursor na barra de tempo."""
@@ -632,14 +660,39 @@ class TimelineWidget(QWidget):
 
     def refresh_timeline(self):
         """Força atualização visual completa após adição/remoção de seções."""
+        self.canvas.refresh_grid()
         self._refresh_status_labels()
         self.canvas.update()
 
     def _refresh_status_labels(self):
         active_sec = self.timeline_manager.get_active_edit_section()
-        s_m, s_s = int(active_sec.start_time_s // 60), int(active_sec.start_time_s % 60)
-        e_m, e_s = int(active_sec.end_time_s // 60), int(active_sec.end_time_s % 60)
-        self.lbl_active_info.setText(f"Editando: <b>{active_sec.name}</b> [{s_m:02d}:{s_s:02d} - {e_m:02d}:{e_s:02d}]")
+        info = active_sec.name
+        if active_sec.family:
+            info += f"   /   Família {active_sec.family}"
+        if active_sec.section_type != "manual":
+            info += f"   /   Confiança {active_sec.confidence:.0%}"
+        if active_sec.tempo_bpm:
+            info += f"   /   {active_sec.tempo_bpm:.0f} BPM"
+        if active_sec.beats_per_bar:
+            info += f"   /   {active_sec.beats_per_bar} tempos"
+        self.lbl_active_info.setText(info if self.canvas.has_session else "")
+        self.lbl_active_info.setToolTip(info)
+        self.lbl_features.setText(active_sec.description)
+        self.lbl_features.setToolTip(active_sec.description)
+        self.lbl_features.setVisible(self.canvas.has_session and bool(active_sec.description))
+        with QSignalBlocker(self.btn_micro):
+            self.btn_micro.setChecked(any(s.micro_enabled for s in self.timeline_manager.sections))
+        count = self.canvas.micro_lane.count
+        self.micro_legend.setVisible(self.canvas.has_session and count > 0)
+        noun = "evento" if count == 1 else "eventos"
+        labels = "&nbsp;&nbsp; / &nbsp;&nbsp;".join(
+            f'<span style="color:{color}">{name}</span>'
+            for color, name in zip(LANE_COLORS, ("Voz", "Percussão", "Instrumentos"))
+        )
+        self.micro_legend.setText(f"{count} {noun}&nbsp;&nbsp; · &nbsp;&nbsp;{labels}")
+        self.btn_micro.setToolTip(f"{count} microevento(s) na faixa. "
+                                  "Alterna as projeções no monitor e na exportação, preservando os marcadores.")
+        self.btn_snap.setEnabled(bool(self.canvas._downbeats))
         self.btn_delete.setEnabled(len(self.timeline_manager.sections) > 1)
 
     def _on_section_clicked(self, sec_id: str):
@@ -648,19 +701,21 @@ class TimelineWidget(QWidget):
         self.section_selected.emit(sec_id)
 
     def _on_boundary_adjusted(self, boundary_idx: int, new_time_s: float):
-        self._refresh_status_labels()
-        active_sec = self.timeline_manager.get_active_edit_section()
-        self.section_selected.emit(active_sec.id)
+        self.refresh_timeline()
+        self.timeline_edited.emit()
 
     def _on_split_clicked(self):
-        cur_t = self.canvas.current_time_s
+        cur_t = self.canvas.snap_time(self.canvas.current_time_s)
         new_sec = self.timeline_manager.split_section_at(cur_t)
         if new_sec:
             self.refresh_timeline()
             self.split_requested.emit(cur_t)
             self.section_selected.emit(new_sec.id)
+            self.timeline_edited.emit()
 
-    def _on_rename_clicked(self):
+    def _on_rename_clicked(self, section_id=None):
+        if isinstance(section_id, str):
+            self.timeline_manager.active_edit_section_id = section_id
         active_sec = self.timeline_manager.get_active_edit_section()
         new_name, ok = QInputDialog.getText(
             self,
@@ -672,6 +727,7 @@ class TimelineWidget(QWidget):
             self.timeline_manager.rename_section(active_sec.id, new_name.strip())
             self.refresh_timeline()
             self.section_renamed.emit(active_sec.id, new_name.strip())
+            self.timeline_edited.emit()
 
     def _on_delete_clicked(self):
         active_sec = self.timeline_manager.get_active_edit_section()
@@ -682,4 +738,5 @@ class TimelineWidget(QWidget):
         if self.timeline_manager.remove_section(sec_id):
             self.refresh_timeline()
             self.section_removed.emit(sec_id)
+            self.timeline_edited.emit()
             self.section_selected.emit(self.timeline_manager.get_active_edit_section().id)

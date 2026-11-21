@@ -6,10 +6,12 @@ extrai metadados (tags e capa) e calcula o hash SHA-256 para cache de stems.
 
 from __future__ import annotations
 
-import os
+import math
+import subprocess
+import tempfile
 import hashlib
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 import soundfile as sf
@@ -67,8 +69,13 @@ def extract_metadata_from_file(file_path: Path) -> AudioMetadata:
         meta.sample_rate = int(info.samplerate)
         meta.channels = int(info.channels)
         meta.format_name = str(info.format)
-    except Exception:
-        pass
+    except (OSError, sf.LibsndfileError):
+        from .probe_verifier import verify_audio_file
+        probe = verify_audio_file(file_path)
+        if not probe.is_valid:
+            raise ValueError(probe.error_message or "Arquivo sem áudio.")
+        meta.sample_rate, meta.channels = probe.sample_rate, probe.channels
+        meta.format_name, meta.duration_s = probe.codec_name, probe.duration_s
 
     # Nome básico derivado do arquivo
     meta.title = file_path.stem
@@ -139,19 +146,37 @@ def load_audio_file(file_path: Path | str, load_data_now: bool = True, target_sr
     sha256 = calculate_file_sha256(p)
     meta = extract_metadata_from_file(p)
 
-    audio_array = None
-    sr = meta.sample_rate
+    source = AudioSource(p, sha256, meta, sample_rate=meta.sample_rate)
+    return populate_audio(source, target_sr) if load_data_now else source
 
-    if load_data_now:
-        audio_array, sr = sf.read(str(p), dtype="float32", always_2d=True)
-        # Se for mono, duplicar para estéreo para compatibilidade com o pipeline
-        if audio_array.shape[1] == 1:
-            audio_array = np.repeat(audio_array, 2, axis=1)
 
-    return AudioSource(
-        file_path=p,
-        sha256_hash=sha256,
-        metadata=meta,
-        audio_data=audio_array,
-        sample_rate=sr
-    )
+def populate_audio(source: AudioSource, target_sr: int | None = None) -> AudioSource:
+    """Decodifica uma fonte já identificada sem reler as tags nem recalcular o hash."""
+    p, sr = source.file_path, source.metadata.sample_rate
+    data = None
+    if source.metadata.channels <= 2:
+        try:
+            data, sr = sf.read(p, dtype="float32", always_2d=True)
+        except (OSError, sf.LibsndfileError):
+            pass
+    if data is None:
+        with tempfile.TemporaryDirectory(prefix="atmossplit_decode_") as folder:
+            wave = Path(folder) / "stereo.wav"
+            cmd = ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
+                   "-i", str(p), "-map", "0:a:0", "-ac", "2", "-c:a", "pcm_f32le",
+                   "-ar", str(target_sr or sr), str(wave)]
+            result = subprocess.run(cmd, capture_output=True)
+            if result.returncode:
+                raise ValueError(result.stderr.decode(errors="replace")[-800:])
+            data, sr = sf.read(wave, dtype="float32", always_2d=True)
+    if data.shape[1] == 1:
+        data = np.repeat(data, 2, axis=1)
+    if target_sr and target_sr != sr:
+        from scipy.signal import resample_poly
+        divisor = math.gcd(sr, target_sr)
+        data = resample_poly(data, target_sr//divisor, sr//divisor, axis=0)
+        sr = target_sr
+    if not len(data):
+        raise ValueError("A faixa não contém amostras de áudio.")
+    source.audio_data, source.sample_rate = data, sr
+    return source

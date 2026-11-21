@@ -44,7 +44,7 @@ def verify_audio_file(file_path: Path | str) -> AudioProbeResult:
         )
 
     cmd = [
-        "ffprobe", "-v", "quiet",
+        "ffprobe", "-v", "quiet", "-protocol_whitelist", "file,pipe",
         "-print_format", "json",
         "-show_format",
         "-show_streams",
@@ -52,7 +52,7 @@ def verify_audio_file(file_path: Path | str) -> AudioProbeResult:
     ]
 
     try:
-        raw_out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+        raw_out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=20)
         info = json.loads(raw_out)
     except Exception as exc:
         return AudioProbeResult(
@@ -87,14 +87,21 @@ def verify_audio_file(file_path: Path | str) -> AudioProbeResult:
     fmt = info.get("format", {})
 
     codec = st.get("codec_name", "")
-    profile = st.get("profile", "")
+    profile = st.get("profile") or ""
     channels = int(st.get("channels", 0))
     layout = st.get("channel_layout", "")
     sample_rate = int(st.get("sample_rate", 0))
     
     # Bitrate pode estar na stream ou no contêiner
-    bit_rate = int(st.get("bit_rate") or fmt.get("bit_rate") or 0)
-    duration = float(fmt.get("duration") or st.get("duration") or 0.0)
+    def number(*values: object) -> float:
+        for value in values:
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                continue
+        return 0.
+    bit_rate = int(number(st.get("bit_rate"), fmt.get("bit_rate")))
+    duration = number(st.get("duration"), fmt.get("duration"))
     format_name = fmt.get("format_name", "")
 
     prof_low = profile.lower()

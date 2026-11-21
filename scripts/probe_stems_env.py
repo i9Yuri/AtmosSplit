@@ -253,6 +253,8 @@ def run_benchmark():
     print("ATMOSSPLIT — FASE 0: BENCHMARK EMPÍRICO DE IA & AMBIENTE")
     print("=" * 60)
 
+    from src.separation.process_shield import apply_process_shield
+    apply_process_shield()
     env_report = audit_system_environment()
     print(f"[*] CPU: {env_report['cpu'].get('model_name', 'Unknown')}")
     print(f"[*] Threads Lógicas: {env_report['cpu'].get('count_logical')}")
@@ -277,36 +279,18 @@ def run_benchmark():
     print("\n[*] Testando Estágio 2 (Sub-Divisão Cirúrgica de Frequência & Crossover)...")
     import numpy as np
     import soundfile as sf
-    from scipy import signal
+    from src.separation.stem_engine import split_surgical
 
-    data, sr = sf.read(str(test_wav))
-    t0 = time.time()
-    mem_before = psutil.Process().memory_info().rss / (1024 * 1024)
-
-    # 1. Crossover de Sub-Grave puro LFE (< 80 Hz Linkwitz-Riley 4th order)
-    sos_lp = signal.butter(4, 80.0, btype='lowpass', fs=sr, output='sos')
-    sos_hp = signal.butter(4, 80.0, btype='highpass', fs=sr, output='sos')
-    sub_lfe = signal.sosfiltfilt(sos_lp, data, axis=0)
-    melodic_bass = signal.sosfiltfilt(sos_hp, data, axis=0)
-
-    # 2. Decomposição Mid / Side para isolar Vocal Principal no centro vs. Coro/Ambiência nos lados
-    mid = 0.5 * (data[:, 0] + data[:, 1])
-    side = 0.5 * (data[:, 0] - data[:, 1])
-
-    # 3. Isolamento de Pratos / Chocalhos / Frequências Aéreas (> 6000 Hz) para Teto
-    sos_air = signal.butter(4, 6000.0, btype='highpass', fs=sr, output='sos')
-    air_layer = signal.sosfiltfilt(sos_air, data, axis=0)
-
-    t1 = time.time()
-    mem_after = psutil.Process().memory_info().rss / (1024 * 1024)
-    dsp_time = t1 - t0
-    dsp_mem = mem_after - mem_before
-
-    print(f"[+] Sub-divisão cirúrgica DSP concluída em {dsp_time:.3f} s (RAM delta: {dsp_mem:.2f} MB)")
+    data, sr = sf.read(test_wav, dtype="float32", always_2d=True)
+    macro = {name: data for name in ("drums", "bass", "vocals", "other")}
+    mem_before = psutil.Process().memory_info().rss
+    start = time.monotonic()
+    parts = split_surgical(macro, sr)
     env_report["benchmark_dsp"] = {
-        "execution_time_s": round(dsp_time, 3),
-        "memory_delta_mb": round(dsp_mem, 2),
-        "stems_extracted": ["sub_lfe_80hz", "melodic_bass", "mid_center_vocal", "side_ambience", "air_highs_ceiling"]
+        "execution_time_s": round(time.monotonic()-start, 3),
+        "memory_delta_mb": round((psutil.Process().memory_info().rss-mem_before)/1024**2, 2),
+        "stems_extracted": list(parts),
+        "vocal_reconstruction_peak_error": float(np.max(abs(parts["lead_vocal"]+parts["backing_vocals"]-data)))
     }
 
     # Salvar relatório JSON intermediário

@@ -1,24 +1,19 @@
-"""
-AtmosSplit — Gerenciador de Cache de Stems
-Salva e recupera stems isolados em disco indexados por SHA-256 e modo de separação,
-permitindo reabrir faixas já processadas instantaneamente (< 0.5s).
-Inclui auditoria de uso em disco e limpeza seletiva ou total.
-"""
+"""Cache local imutável. O manifesto publica uma geração completa dos stems."""
 
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import shutil
-import json
-import logging
+import tempfile
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Dict, Optional, List, Any
+from typing import Any
 
 import numpy as np
 import soundfile as sf
-
-log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,170 +29,139 @@ class CachedStemMetadata:
     is_ceiling_candidate: bool = False
 
 
+def _component(name: str) -> str:
+    if not name or name in (".", "..") or Path(name).name != name:
+        raise ValueError("Identificador de cache inválido.")
+    return name
+
+
 class StemCacheManager:
-    def __init__(self, base_cache_dir: Optional[Path] = None):
-        self.base_dir = base_cache_dir or Path(os.path.expanduser("~/.cache/atmossplit/stems_cache"))
+    def __init__(self, base_cache_dir: Path | None = None):
+        cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        self.base_dir = base_cache_dir or cache_home / "atmossplit" / "stems_cache"
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
+    @contextmanager
+    def _cache_lock(self, exclusive: bool = False):
+        # O descritor do diretório continua estável quando uma entrada é removida.
+        directory = os.open(self.base_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(directory, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(directory)
+
     def get_track_cache_dir(self, file_hash: str, mode: str) -> Path:
-        """Diretório específico da combinação Hash + Modo."""
-        track_dir = self.base_dir / f"{file_hash}_{mode}"
-        track_dir.mkdir(parents=True, exist_ok=True)
-        return track_dir
+        version = "_v2" if mode == "surgical" else ""
+        return self.base_dir / f"{_component(file_hash)}_{_component(mode)}{version}"
+
+    def get_manifest(self, file_hash: str, mode: str) -> list[CachedStemMetadata] | None:
+        root = self.get_track_cache_dir(file_hash, mode)
+        try:
+            data = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            if data["file_hash"] != file_hash or data["mode"] != mode:
+                return None
+            items = [CachedStemMetadata(**row) for row in data["stems"]]
+            for item in items:
+                path = (root / item.relative_path).resolve()
+                if not path.is_relative_to(root.resolve()):
+                    return None
+                info = sf.info(path)
+                if (info.samplerate != item.sample_rate or info.channels != item.channels
+                        or info.frames <= 0 or abs(info.frames - item.duration_s * info.samplerate) > 1):
+                    return None
+            return items or None
+        except (OSError, ValueError, TypeError, KeyError, sf.LibsndfileError):
+            return None
 
     def has_cached_stems(self, file_hash: str, mode: str) -> bool:
-        """Verifica se todos os stems e o manifesto de metadados existem no disco."""
-        track_dir = self.get_track_cache_dir(file_hash, mode)
-        manifest_path = track_dir / "manifest.json"
-        if not manifest_path.exists():
-            return False
+        return self.get_manifest(file_hash, mode) is not None
 
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            stems = data.get("stems", [])
-            if not stems:
-                return False
-            for s in stems:
-                stem_file = track_dir / s["relative_path"]
-                if not stem_file.exists() or stem_file.stat().st_size == 0:
-                    return False
-            return True
-        except Exception:
-            return False
+    def save_stems(self, file_hash: str, mode: str, stems_dict: dict[str, np.ndarray],
+                   stems_meta: dict[str, dict[str, Any]], sample_rate: int) -> list[CachedStemMetadata]:
+        with self._cache_lock():
+            root = self.get_track_cache_dir(file_hash, mode)
+            root.mkdir(parents=True, exist_ok=True)
+            with (root / ".writer").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                existing = self.get_manifest(file_hash, mode)
+                if existing:
+                    return existing
+                # Um worker morto pode ter deixado apenas uma geração não publicada.
+                for partial in root.glob(".pending-*"):
+                    shutil.rmtree(partial, ignore_errors=True)
+                stage = Path(tempfile.mkdtemp(prefix=".pending-", dir=root))
+                generation = "audio-" + stage.name.removeprefix(".pending-")
+                manifest = []
+                try:
+                    for name, audio in stems_dict.items():
+                        meta = stems_meta.get(name, {})
+                        filename = f"{_component(name)}.wav"
+                        samples = audio[:, None] if audio.ndim == 1 else audio
+                        # Stems podem exceder 0 dBFS antes do master. FLOAT preserva headroom.
+                        sf.write(stage / filename, samples, sample_rate, subtype="FLOAT")
+                        manifest.append(CachedStemMetadata(
+                            name, meta.get("display_name", name), meta.get("color_hex", "#70B6AD"),
+                            f"{generation}/{filename}", sample_rate, len(samples) / sample_rate,
+                            samples.shape[1], meta.get("is_lfe_candidate", False),
+                            meta.get("is_ceiling_candidate", False)))
+                    payload = {"file_hash": file_hash, "mode": mode, "sample_rate": sample_rate,
+                               "stems": [asdict(item) for item in manifest]}
+                    (stage / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                    stage.rename(root / generation)
+                    (root / generation / "manifest.json").replace(root / "manifest.json")
+                finally:
+                    if stage.exists():
+                        shutil.rmtree(stage)
+                return manifest
 
-    def save_stems(
-        self,
-        file_hash: str,
-        mode: str,
-        stems_dict: Dict[str, np.ndarray],
-        stems_meta: Dict[str, Dict[str, Any]],
-        sample_rate: int
-    ) -> List[CachedStemMetadata]:
-        """Salva stems em arquivos WAV PCM 24-bit e grava o manifesto de cache."""
-        track_dir = self.get_track_cache_dir(file_hash, mode)
-        manifest_items: List[CachedStemMetadata] = []
+    def load_stems(self, file_hash: str, mode: str) -> dict[str, np.ndarray] | None:
+        with self._cache_lock():
+            items = self.get_manifest(file_hash, mode)
+            if not items:
+                return None
+            root = self.get_track_cache_dir(file_hash, mode)
+            try:
+                return {item.stem_name: sf.read(root / item.relative_path, dtype="float32", always_2d=True)[0]
+                        for item in items}
+            except (OSError, sf.LibsndfileError):
+                return None
 
-        for name, audio_data in stems_dict.items():
-            meta = stems_meta.get(name, {})
-            filename = f"{name}.wav"
-            filepath = track_dir / filename
-            
-            # Garantir 2D (samples, channels)
-            if audio_data.ndim == 1:
-                audio_data = np.column_stack([audio_data, audio_data])
-            elif audio_data.ndim == 2 and audio_data.shape[0] < audio_data.shape[1]:
-                audio_data = audio_data.T
+    def list_cached_tracks(self) -> list[dict[str, Any]]:
+        with self._cache_lock():
+            return self._list_tracks()
 
-            sf.write(str(filepath), audio_data, sample_rate, subtype="PCM_24")
-
-            dur = float(audio_data.shape[0]) / float(sample_rate)
-            c_meta = CachedStemMetadata(
-                stem_name=name,
-                display_name=meta.get("display_name", name.capitalize()),
-                color_hex=meta.get("color_hex", "#4A90E2"),
-                relative_path=filename,
-                sample_rate=sample_rate,
-                duration_s=dur,
-                channels=int(audio_data.shape[1]),
-                is_lfe_candidate=meta.get("is_lfe_candidate", False),
-                is_ceiling_candidate=meta.get("is_ceiling_candidate", False),
-            )
-            manifest_items.append(c_meta)
-
-        # Salvar manifesto JSON
-        manifest_path = track_dir / "manifest.json"
-        manifest_data = {
-            "file_hash": file_hash,
-            "mode": mode,
-            "sample_rate": sample_rate,
-            "stems": [asdict(m) for m in manifest_items]
-        }
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest_data, f, indent=2, ensure_ascii=False)
-
-        log.info("Stems salvos no cache: %s (%d faixas)", track_dir, len(manifest_items))
-        return manifest_items
-
-    def load_stems(self, file_hash: str, mode: str) -> Optional[Dict[str, np.ndarray]]:
-        """Carrega todos os arrays de áudio dos stems do cache em memória."""
-        if not self.has_cached_stems(file_hash, mode):
-            return None
-
-        track_dir = self.get_track_cache_dir(file_hash, mode)
-        manifest_path = track_dir / "manifest.json"
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest_data = json.load(f)
-
-        stems: Dict[str, np.ndarray] = {}
-        for item in manifest_data.get("stems", []):
-            stem_path = track_dir / item["relative_path"]
-            data, sr = sf.read(str(stem_path), dtype="float32", always_2d=True)
-            stems[item["stem_name"]] = data
-
-        return stems
-
-    def get_manifest(self, file_hash: str, mode: str) -> Optional[List[CachedStemMetadata]]:
-        """Recupera metadados salvos sem precisar ler todo o áudio."""
-        track_dir = self.get_track_cache_dir(file_hash, mode)
-        manifest_path = track_dir / "manifest.json"
-        if not manifest_path.exists():
-            return None
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest_data = json.load(f)
-            return [CachedStemMetadata(**item) for item in manifest_data.get("stems", [])]
-        except Exception:
-            return None
+    def _list_tracks(self) -> list[dict[str, Any]]:
+        tracks = []
+        for root in self.base_dir.iterdir():
+            if root.is_symlink() or not root.is_dir():
+                continue
+            try:
+                data = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            size = 0
+            for path in root.rglob("*"):
+                try:
+                    if path.is_file():
+                        size += path.stat().st_size
+                except FileNotFoundError:
+                    continue  # Uma geração foi publicada durante o inventário.
+            tracks.append(dict(folder_name=root.name, file_hash=data.get("file_hash", ""),
+                               mode=data.get("mode", ""), stems_count=len(data.get("stems", [])),
+                               size_bytes=size, size_mb=round(size / (1024**2), 2)))
+        return tracks
 
     def get_total_cache_size_bytes(self) -> int:
-        """Calcula tamanho total do cache em disco."""
-        if not self.base_dir.exists():
-            return 0
-        total = 0
-        for entry in self.base_dir.rglob("*"):
-            if entry.is_file():
-                try:
-                    total += entry.stat().st_size
-                except OSError:
-                    pass
-        return total
+        return sum(track["size_bytes"] for track in self.list_cached_tracks())
 
-    def list_cached_tracks(self) -> List[Dict[str, Any]]:
-        """Lista faixas em cache com tamanho e quantidade de stems."""
-        if not self.base_dir.exists():
-            return []
-        items = []
-        for child in self.base_dir.iterdir():
-            if child.is_dir():
-                manifest_path = child / "manifest.json"
-                size_bytes = sum(f.stat().st_size for f in child.glob("*") if f.is_file())
-                stems_count = 0
-                mode = ""
-                file_hash = ""
-                if manifest_path.exists():
-                    try:
-                        with open(manifest_path, "r", encoding="utf-8") as mf:
-                            m_data = json.load(mf)
-                            stems_count = len(m_data.get("stems", []))
-                            mode = m_data.get("mode", "")
-                            file_hash = m_data.get("file_hash", "")
-                    except Exception:
-                        pass
-                items.append({
-                    "folder_name": child.name,
-                    "file_hash": file_hash,
-                    "mode": mode,
-                    "stems_count": stems_count,
-                    "size_bytes": size_bytes,
-                    "size_mb": round(size_bytes / (1024 * 1024), 2)
-                })
-        return items
-
-    def clear_cache(self) -> int:
-        """Limpa todo o cache e retorna o total de bytes liberados."""
-        freed = self.get_total_cache_size_bytes()
-        if self.base_dir.exists():
-            shutil.rmtree(self.base_dir)
-            self.base_dir.mkdir(parents=True, exist_ok=True)
+    def clear_cache(self, *, keep: tuple[str, str] | None = None) -> int:
+        protected = self.get_track_cache_dir(*keep) if keep else None
+        freed = 0
+        with self._cache_lock(exclusive=True):
+            for row in self._list_tracks():
+                root = self.base_dir / row["folder_name"]
+                if root != protected:
+                    shutil.rmtree(root)
+                    freed += row["size_bytes"]
         return freed

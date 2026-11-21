@@ -1,46 +1,27 @@
-"""
-AtmosSplit — Planta Interativa 2D / 3D da Sala 7.1.4
-Mostra o ponto de escuta, a Soundbar JBL Bar 1000, satélites e drivers de teto.
-Suporta:
-- Espelhamento estéreo (is_stereo) com nós gêmeos (L e R) perfeitamente simétricos e ponte estéreo
-- Arraste sincronizado onde mover um lado espelha instantaneamente o outro
-- Seleção e controle dinâmico de altura Z via scroll do mouse
-- Visualização tridimensional pelo raio do círculo (maior raio = mais alto/perto do teto)
-- Duplo clique ou tecla 'D' para alternar espelhamento estéreo
-"""
+"""Planta do estúdio com projeção de altura, picking e edição de objetos."""
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import numpy as np
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
-from PySide6.QtGui import (
-    QPainter,
-    QColor,
-    QPen,
-    QBrush,
-    QFont,
-    QPainterPath,
-    QMouseEvent,
-    QWheelEvent,
-    QKeyEvent,
-    QCursor,
-)
-from PySide6.QtWidgets import QWidget, QMenu
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen, QPolygonF, QWheelEvent
+from PySide6.QtWidgets import QMenu, QToolTip, QWidget
 
-from ..spatial.vbap_engine import SPEAKER_COORDINATES_714, SpeakerPosition714, VBAP714Engine
-from ..spatial.auto_director import SpatialPlacement
 from ..separation.stem_engine import StemTrack
+from ..spatial.auto_director import SpatialPlacement
+from ..spatial.vbap_engine import SPEAKER_COORDINATES_714, VBAP714Engine
+from . import theme as T
+from .micro_event_lane import LANE_COLORS, event_details, event_row
+
+if TYPE_CHECKING:
+    from ..spatial.micro_events import SpatialEvent
 
 
 class RoomView714(QWidget):
-    """
-    Widget gráfico renderizando a sala de audição 7.1.4.
-    Permite selecionar bolinhas clicando nelas e ajustar a altura sonora Z usando a roda do mouse.
-    Oferece nós gêmeos espelhados (L e R) para instrumentos em modo estéreo surround.
-    """
     placement_changed = Signal(str, float, float, float)
     stereo_toggled = Signal(str, bool)
     stem_selected = Signal(str)
@@ -51,859 +32,440 @@ class RoomView714(QWidget):
     playback_toggle_requested = Signal()
     seek_requested = Signal(float)
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setMinimumSize(480, 440)
-        self.setMouseTracking(True)
+        self.setMinimumSize(350, 260)
+        self.setAccessibleName("Sala espacial 7.1.4")
+        self.setToolTip("Arraste a fonte no plano. A roda ajusta a altura. D alterna o espelhamento.")
         self.setFocusPolicy(Qt.StrongFocus)
-
+        self.setMouseTracking(True)
         self.vbap = VBAP714Engine()
-        self.stems: Dict[str, StemTrack] = {}
-        self.placements: Dict[str, SpatialPlacement] = {}
-        self.active_stem_name: Optional[str] = None
-        self.hovered_stem_info: Optional[Tuple[str, str]] = None  # (stem_name, "L"|"R"|"C")
-        self._is_dragging: bool = False
-        self._drag_puck_side: str = "C"  # "L", "R", ou "C"
+        self.stems: dict[str, StemTrack] = {}
+        self._sources: dict[str, StemTrack] = {}
+        self.placements: dict[str, SpatialPlacement] = {}
+        self.projections: dict[str, SpatialPlacement] = {}
+        self.micro_events: tuple[SpatialEvent, ...] = ()
+        self._event_by_stem: dict[str, SpatialEvent] = {}
+        self.active_stem_name: str | None = None
+        self.hovered_stem_info: tuple[str, str] | None = None
+        self._is_dragging = False
+        self.stems_vu: dict[str, float] = {}
+        self.sub_vu = 0.0
+        self._ray_key = None
+        self._rays = []
+        self.reduced_motion = False
 
-        # Cache de ganhos acústicos para desenho instantâneo de raios (Zero VBAP no paintEvent)
-        self._cached_rays_l: Optional[np.ndarray] = None
-        self._cached_rays_r: Optional[np.ndarray] = None
+    @staticmethod
+    def get_visual_radius(z: float, vu: float = 0.0) -> float:
+        return 11.0 + 22.0 * z + 3.5 * vu
 
-        # VU Meters reativos em tempo real
-        self.stems_vu: Dict[str, float] = {}
-        self.sub_vu: float = 0.0
+    @staticmethod
+    def _nodes(p: SpatialPlacement) -> tuple[tuple[str, float], ...]:
+        if p.is_stereo:
+            d = abs(p.x)
+            return (("L", -d), ("R", d))
+        return (("C", p.x),)
 
-        # Paleta estética Hallmark (Dark Neutro, alto contraste, sem roxo genérico)
-        self.color_bg = QColor("#0D0E11")
-        self.color_grid = QColor("#1A1D24")
-        self.color_walls = QColor("#262A34")
-        self.color_listener = QColor("#4A5568")
-        self.color_soundbar = QColor("#2D3748")
-        self.color_surround = QColor("#232936")
-        self.color_ceiling_ring = QColor(255, 255, 255, 28)
-        self.color_text_sec = QColor("#718096")
-        self._stem_colors: Dict[str, QColor] = {}
+    def set_stems_and_placements(self, stems: list[StemTrack], placements: dict[str, SpatialPlacement]) -> None:
+        self._is_dragging = False
+        self._sources = {s.name: s for s in stems}
+        self.stems.clear()
+        self.set_micro_events(())
+        self.set_playback_placements(placements)
 
-    def _update_rays_cache(self):
-        """Atualiza os vetores de ganhos pré-calculados para o feixe acústico visual do instrumento ativo."""
-        if not self.active_stem_name:
-            self._cached_rays_l = None
-            self._cached_rays_r = None
-            return
-
-        plc = self.placements.get(self.active_stem_name)
-        if not plc or plc.is_muted or plc.volume_gain <= 0.01:
-            self._cached_rays_l = None
-            self._cached_rays_r = None
-            return
-
-        try:
-            if plc.is_stereo:
-                dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-                self._cached_rays_l = np.asarray(self.vbap.calculate_gains(-dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
-                self._cached_rays_r = np.asarray(self.vbap.calculate_gains(dist_x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
-            else:
-                gl = np.asarray(self.vbap.calculate_gains(plc.x, plc.y, plc.z, plc.spread, plc.lfe_send), dtype=np.float32)
-                self._cached_rays_l = gl
-                self._cached_rays_r = gl
-        except Exception:
-            self._cached_rays_l = None
-            self._cached_rays_r = None
-
-    def _resolve_stem_descriptor(self, name: str, plc: SpatialPlacement, base_stems: Dict[str, StemTrack]) -> StemTrack:
-        base_name = plc.source_stem_name or (name.split("::")[0] if "::" in name else name)
-        base = base_stems.get(base_name)
-        if not base:
-            base = StemTrack(name, name, "#00E5FF", np.zeros((10, 2), dtype=np.float32), 48000)
-        if "::spatial_throw" in name:
-            return StemTrack(
-                name=name,
-                display_name="Vocal Throw (BL/BR)",
-                color_hex="#00E5FF",
-                audio_data=base.audio_data,
-                sample_rate=base.sample_rate
-            )
-        elif "::" in name:
-            suffix = name.split("::")[-1]
-            return StemTrack(
-                name=name,
-                display_name=f"{base.display_name} #{suffix}",
-                color_hex=base.color_hex,
-                audio_data=base.audio_data,
-                sample_rate=base.sample_rate
-            )
-        return base
-
-    def set_stems_and_placements(self, stems: List[StemTrack], placements: Dict[str, SpatialPlacement]):
-        """Atualiza a lista de instrumentos e seus posicionamentos espaciais."""
-        self._raw_stems = list(stems)
-        base_stems = {s.name: s for s in stems}
-        self.stems = {name: self._resolve_stem_descriptor(name, plc, base_stems)
-                      for name, plc in placements.items()}
-        self._stem_colors = {name: QColor(stem.color_hex) for name, stem in self.stems.items()}
-        self.placements = placements
-        if self.stems and (self.active_stem_name not in self.stems):
-            self.active_stem_name = next(iter(self.stems))
-        self._update_rays_cache()
-        self.update()
-
-    def set_playback_placements(self, placements: Dict[str, SpatialPlacement]):
-        """Atualiza as coordenadas 3D em tempo real durante playback ou scrubbing (33-60 FPS)."""
+    def set_playback_placements(self, placements: dict[str, SpatialPlacement]) -> None:
         if self._is_dragging:
             return
-
-        # Sincroniza instâncias se chaves mudarem
-        if set(placements.keys()) != set(self.placements.keys()):
-            base_stems = {s.name: s for s in getattr(self, "_raw_stems", [])}
-            self.stems = {
-                name: self._resolve_stem_descriptor(name, plc, base_stems)
-                for name, plc in placements.items()
-            }
-            self._stem_colors = {name: QColor(stem.color_hex) for name, stem in self.stems.items()}
-
+        self.projections = {key: p for key, p in placements.items() if key.endswith("::micro")}
+        if self.stems.keys() != placements.keys() - self.projections.keys():
+            self.stems = {}
+            for key, p in placements.items():
+                if key in self.projections:
+                    continue
+                base = self._sources.get(p.source_stem_name or key.split("::")[0])
+                if base:
+                    name = base.display_name
+                    if "::spatial_throw" in key:
+                        name = "Vocal Throw (BL/BR)"
+                    elif "::" in key:
+                        name = f"{name} #{key.rsplit('::', 1)[1]}"
+                    self.stems[key] = base if key == base.name else replace(base, name=key, display_name=name)
         self.placements = placements
+        if self.active_stem_name not in self.stems:
+            self.active_stem_name = next(iter(self.stems), None)
         self._update_rays_cache()
         self.update()
 
-    def set_active_stem(self, stem_name: str):
-        """Seleciona o instrumento ativo de forma idempotente."""
-        if stem_name in self.stems:
-            if self.active_stem_name == stem_name:
-                return
+    def set_micro_events(self, events: tuple[SpatialEvent, ...]) -> None:
+        if events != self.micro_events:
+            self.micro_events = events
+            self._event_by_stem = {ev.stem: ev for ev in events}
+            self.update()
+
+    def _update_rays_cache(self) -> None:
+        p = self.placements.get(self.active_stem_name)
+        if not p:
+            self._rays = []
+            self._ray_key = None
+            return
+        other_solo = any(item.is_solo for item in self.placements.values()) and not p.is_solo
+        key = (p.x, p.y, p.z, p.spread, p.lfe_send, p.is_muted, p.is_stereo, p.volume_gain, other_solo)
+        if key == self._ray_key:
+            return
+        self._ray_key = key
+        self._rays = []
+        if p.is_muted or p.volume_gain <= 0.0 or other_solo:
+            return
+        for _, x in self._nodes(p):
+            gains = self.vbap.calculate_gains(x, p.y, p.z, p.spread, p.lfe_send)
+            self._rays.append((x, gains))
+
+    def set_vu_levels(self, stems_vu: dict[str, float], sub_vu: float) -> None:
+        if self.stems_vu != stems_vu or self.sub_vu != sub_vu:
+            self.stems_vu, self.sub_vu = stems_vu, sub_vu
+            self.update()
+
+    def set_active_stem(self, stem_name: str) -> None:
+        if stem_name in self.stems and stem_name != self.active_stem_name:
             self.active_stem_name = stem_name
             self._update_rays_cache()
             self.stem_selected.emit(stem_name)
             self.update()
 
-    def update_placement(self, stem_name: str, x: float, y: float, z: float, is_stereo: Optional[bool] = None):
-        """Atualiza a posição de um instrumento e redesenha."""
-        if stem_name in self.placements:
-            plc = self.placements[stem_name]
-            plc.x = x
-            plc.y = y
-            plc.z = z
+    def update_placement(self, name: str, x: float, y: float, z: float, is_stereo: bool | None = None) -> None:
+        if name in self.stems:
+            p = self.placements[name]
+            p.x, p.y, p.z = x, y, z
             if is_stereo is not None:
-                plc.is_stereo = is_stereo
-            if self.active_stem_name == stem_name:
-                self._update_rays_cache()
+                p.is_stereo = is_stereo
+            self._update_rays_cache()
             self.update()
 
-    def toggle_stereo_mirror(self, stem_name: str):
-        """Alterna espelhamento estéreo para o instrumento."""
-        if stem_name in self.placements:
-            plc = self.placements[stem_name]
-            plc.is_stereo = not plc.is_stereo
-            if plc.is_stereo and abs(plc.x) < 0.20:
-                plc.x = 0.60
-            self.stereo_toggled.emit(stem_name, plc.is_stereo)
-            self.placement_changed.emit(stem_name, plc.x, plc.y, plc.z)
-            self.update()
+    def toggle_stereo_mirror(self, name: str) -> None:
+        if name in self.stems:
+            p = self.placements[name]
+            p.is_stereo = not p.is_stereo
+            if p.is_stereo and abs(p.x) < 0.2:
+                p.x = 0.6
+            self.stereo_toggled.emit(name, p.is_stereo)
+            self._move(name, p.x, p.y, p.z)
 
-    def set_vu_levels(self, stems_vu: Dict[str, float], sub_vu: float):
-        """Atualiza os medidores VU instantâneos para animação de pulsação."""
-        if self.stems_vu == stems_vu and self.sub_vu == sub_vu:
-            return
-        self.stems_vu = stems_vu
-        self.sub_vu = sub_vu
-        self.update()
-
-    # --- Cálculo de Raio Visual & Perspectiva 3D ---
-    @staticmethod
-    def get_visual_radius(z: float, vu: float = 0.0) -> float:
-        """
-        Calcula o raio visual do círculo proporcional à altura Z no espaço sonoro:
-        - z = 0.0 (chão/ouvido): raio base de 11.0 px
-        - z = 1.0 (teto surround): raio base de 33.0 px
-        Aumento de 3x no raio, comunicando instantaneamente elevação tridimensional.
-        """
-        base_r = 11.0 + z * 22.0
-        return base_r + vu * 3.5
-
-    # --- Conversão de Coordenadas ---
     def _room_to_widget_coords(self, x: float, y: float) -> QPointF:
-        """Converte coordenadas [-1, 1] do plano da sala para pixels do widget."""
-        w = self.width()
-        h = self.height()
-        margin = 52.0
-        center_x = w / 2.0
-        center_y = h / 2.0
-        scale_x = (w - 2.0 * margin) / 2.0
-        scale_y = (h - 2.0 * margin) / 2.0
+        w, h = self.width(), self.height()
+        return QPointF(w * 0.5 + x * (w * 0.5 - 46) * (0.91 - y * 0.09),
+                       h * 0.5 + 8 - y * max(1, h * 0.5 - 58))
 
-        px = center_x + x * scale_x
-        py = center_y - y * scale_y
-        return QPointF(px, py)
+    def _widget_to_room_coords(self, px: float, py: float) -> tuple[float, float]:
+        w, h = self.width(), self.height()
+        y = np.clip((h * 0.5 + 8 - py) / max(1, h * 0.5 - 58), -1.0, 1.0)
+        x = np.clip((px - w * 0.5) / max(1, (w * 0.5 - 46) * (0.91 - y * 0.09)), -1.0, 1.0)
+        return float(x), float(y)
 
-    def _widget_to_room_coords(self, px: float, py: float) -> Tuple[float, float]:
-        """Converte pixels do widget para coordenadas normalizadas [-1, 1]."""
-        w = self.width()
-        h = self.height()
-        margin = 52.0
-        center_x = w / 2.0
-        center_y = h / 2.0
-        scale_x = (w - 2.0 * margin) / 2.0
-        scale_y = (h - 2.0 * margin) / 2.0
-
-        rx = (px - center_x) / scale_x
-        ry = -(py - center_y) / scale_y
-        return max(-1.0, min(1.0, rx)), max(-1.0, min(1.0, ry))
-
-    def _get_node_positions(self, x_or_plc, y: Optional[float] = None, z: Optional[float] = None) -> Tuple[QPointF, QPointF]:
-        """Retorna (ponto_no_chão, ponto_flutuante_da_esfera), aceitando SpatialPlacement ou coordenadas (x, y, z)."""
+    def _get_node_positions(self, x_or_plc: float | SpatialPlacement, y: float = 0, z: float = 0) -> tuple[QPointF, QPointF]:
         if isinstance(x_or_plc, SpatialPlacement):
-            rx, ry, rz = x_or_plc.x, x_or_plc.y, x_or_plc.z
+            x, y, z = x_or_plc.x, x_or_plc.y, x_or_plc.z
         else:
-            rx, ry, rz = float(x_or_plc), float(y or 0.0), float(z or 0.0)
-        ground_pt = self._room_to_widget_coords(rx, ry)
-        y_lift = rz * 18.0
-        sphere_pt = QPointF(ground_pt.x(), ground_pt.y() - y_lift)
-        return ground_pt, sphere_pt
+            x = x_or_plc
+        floor = self._room_to_widget_coords(x, y)
+        return floor, floor - QPointF(0, z * 34)
 
-    # --- Pintura / Renderização ---
-    def paintEvent(self, event):
+    def _speaker_point(self, speaker) -> QPointF:
+        if speaker.is_lfe:
+            return self._room_to_widget_coords(-0.99, 0.87)
+        return self._get_node_positions(speaker.x, speaker.y, speaker.z)[1]
+
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        w = self.width()
-        h = self.height()
-
-        # 1. Fundo da Sala Acústica
-        painter.fillRect(0, 0, w, h, self.color_bg)
-
-        # 2. Grade de Distância Acústica
-        pen_grid = QPen(self.color_grid, 1.0, Qt.DotLine)
-        painter.setPen(pen_grid)
-
-        center = self._room_to_widget_coords(0.0, 0.0)
-        radius_max = min(w, h) / 2.0 - 52.0
-        for r_factor in [0.33, 0.66, 1.0]:
-            r_px = radius_max * r_factor
-            painter.drawEllipse(center, r_px, r_px)
-
-        painter.drawLine(int(center.x()), 25, int(center.x()), h - 25)
-        painter.drawLine(25, int(center.y()), w - 25, int(center.y()))
-
-        # 3. Desenhar Caixas Físicas da JBL Bar 1000MK2 e Subwoofer
+        painter.fillRect(self.rect(), QColor(T.CANVAS))
+        painter.setPen(QPen(QColor(T.ACCENT if self.hasFocus() else T.LINE), 1))
+        painter.setBrush(QColor(T.PANEL))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 12, 12)
+        floor = QPolygonF([self._room_to_widget_coords(x, y) for x, y in
+                           ((-1, 1), (1, 1), (1, -1), (-1, -1))])
+        painter.setPen(QPen(QColor(T.LINE), 1))
+        painter.setBrush(QColor(T.CANVAS))
+        painter.drawPolygon(floor)
+        for t in (-0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75):
+            painter.setPen(QPen(QColor(T.GRID if t else T.LINE), 1,
+                                Qt.SolidLine if t else Qt.DashLine))
+            painter.drawLine(self._room_to_widget_coords(t, 1), self._room_to_widget_coords(t, -1))
+            painter.drawLine(self._room_to_widget_coords(-1, t), self._room_to_widget_coords(1, t))
+        painter.setFont(QFont(T.BODY, 9, QFont.DemiBold))
+        painter.setPen(QColor(T.SECONDARY))
+        painter.drawText(QRectF(0, 5, self.width(), 22), Qt.AlignCenter, "Frente · TV")
         self._draw_speakers(painter)
+        center = self._room_to_widget_coords(0, 0)
+        painter.setPen(QPen(QColor(T.SECONDARY), 1.2))
+        painter.setBrush(QColor(T.PANEL_ALT))
+        painter.drawEllipse(center, 6.0, 6.0)
+        painter.setPen(QColor(T.INK))
+        painter.drawText(QRectF(center.x()-55, center.y()+9, 110, 18), Qt.AlignCenter, "Escuta")
+        active = self.placements.get(self.active_stem_name)
+        if active:
+            for x, gains in self._rays:
+                point = self._get_node_positions(x, active.y, active.z)[1]
+                for speaker, gain in zip(SPEAKER_COORDINATES_714, gains):
+                    if gain > 0.10:
+                        painter.setPen(QPen(T.tint(T.ACCENT, 55 + 105 * gain), 1.0 + gain))
+                        painter.drawLine(point, self._speaker_point(speaker))
+        for name in sorted(self.stems, key=lambda n: (n == self.active_stem_name, self.placements[n].z)):
+            self._draw_source(painter, name)
+        for key, projection in self.projections.items():
+            self._draw_projection(painter, key, projection)
+        painter.end()
 
-        # 4. Desenhar Raios de Energia Acústica do Instrumento Ativo
-        if self.active_stem_name and self.active_stem_name in self.placements:
-            self._draw_acoustic_energy_rays(painter, self.active_stem_name)
-
-        # 5. Ouvinte no Centro (Ponto de Escuta)
-        self._draw_listener(painter, center)
-
-        # 6. Desenhar Instrumentos com Projeção 3D de Altura e Suporte a Nós Estéreo Gêmeos
-        self._draw_stem_nodes(painter)
-
-        # 7. Dica Visual no Rodapé
-        self._draw_canvas_hints(painter, w, h)
-
-    def _draw_canvas_hints(self, painter: QPainter, w: int, h: int):
-        painter.setFont(QFont("sans-serif", 8))
-        painter.setPen(QColor("#718096"))
-        hint_text = "💡 Clique na bolinha para mover • Scroll do Mouse = Altura Z (Raio) • Duplo clique ou 'D' = Espelhar Estéreo (L/R)"
-        painter.drawText(QRectF(10, h - 22, w - 20, 18), Qt.AlignCenter, hint_text)
-
-    def _draw_speakers(self, painter: QPainter):
-        """Renderiza a Soundbar Frontal, Satélites e Drivers Superiores de Teto."""
-        font = QFont("sans-serif", 8, QFont.Medium)
-        painter.setFont(font)
-
-        # Soundbar Frontal (FL, Center, FR)
-        p_fl = self._room_to_widget_coords(-0.7, 1.0)
-        p_fc = self._room_to_widget_coords(0.0, 1.0)
-        p_fr = self._room_to_widget_coords(0.7, 1.0)
-
-        bar_rect = QRectF(p_fl.x() - 10, p_fc.y() - 12, (p_fr.x() - p_fl.x()) + 20, 24)
-        painter.setPen(QPen(QColor("#3A4150"), 1.5))
-        painter.setBrush(QBrush(self.color_soundbar))
-        painter.drawRoundedRect(bar_rect, 6.0, 6.0)
-
-        painter.setPen(QColor("#A0AEC0"))
-        painter.drawText(bar_rect, Qt.AlignCenter, "JBL BAR 1000 (Frontal L / C / R)")
-
-        # Subwoofer com pulsação LFE
-        p_sub = self._room_to_widget_coords(-0.95, 0.95)
-        if self.sub_vu > 0.05:
-            pulse_radius = 16.0 + self.sub_vu * 24.0
-            pulse_alpha = int(min(220, self.sub_vu * 255))
-            painter.setPen(QPen(QColor(255, 61, 0, pulse_alpha), 1.5, Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(p_sub, pulse_radius, pulse_radius)
-            if self.sub_vu > 0.3:
-                painter.drawEllipse(p_sub, pulse_radius + 8.0, pulse_radius + 8.0)
-
-        sub_rect = QRectF(p_sub.x() - 14, p_sub.y() - 14, 28, 28)
-        painter.setPen(QPen(QColor("#E53E3E"), 1.5))
-        painter.setBrush(QBrush(QColor("#2D1B1B")))
-        painter.drawRoundedRect(sub_rect, 4.0, 4.0)
-        painter.setPen(QColor("#FEB2B2"))
-        painter.drawText(sub_rect, Qt.AlignCenter, "SUB")
-
-        # Satélites Traseiros (BL, BR)
-        for (code, label, x, y) in [("BL", "Satélite Esq", -0.7, -1.0), ("BR", "Satélite Dir", 0.7, -1.0)]:
-            pt = self._room_to_widget_coords(x, y)
-            rect = QRectF(pt.x() - 20, pt.y() - 10, 40, 20)
-            painter.setPen(QPen(QColor("#4A5568"), 1.2))
-            painter.setBrush(QBrush(self.color_surround))
-            painter.drawRoundedRect(rect, 4.0, 4.0)
-            painter.setPen(QColor("#A0AEC0"))
-            painter.drawText(rect, Qt.AlignCenter, code)
-
-        # Surrounds Laterais (SL, SR)
-        for (code, x, y) in [("SL", -1.0, 0.0), ("SR", 1.0, 0.0)]:
-            pt = self._room_to_widget_coords(x, y)
-            rect = QRectF(pt.x() - 12, pt.y() - 16, 24, 32)
-            painter.setPen(QPen(QColor("#4A5568"), 1.2))
-            painter.setBrush(QBrush(self.color_surround))
-            painter.drawRoundedRect(rect, 4.0, 4.0)
-            painter.setPen(QColor("#A0AEC0"))
-            painter.drawText(rect, Qt.AlignCenter, code)
-
-        # 4 Drivers de Altura no Teto (TFL, TFR, TBL, TBR)
-        painter.setPen(QPen(self.color_ceiling_ring, 1.5, Qt.DashLine))
-        painter.setBrush(QBrush(QColor(66, 153, 225, 14)))
-        for (code, x, y) in [("TFL", -0.6, 0.6), ("TFR", 0.6, 0.6), ("TBL", -0.6, -0.6), ("TBR", 0.6, -0.6)]:
-            pt = self._room_to_widget_coords(x, y)
-            painter.drawEllipse(pt, 24.0, 24.0)
-            painter.setPen(QColor("#63B3ED"))
-            painter.drawText(QRectF(pt.x() - 16, pt.y() - 10, 32, 20), Qt.AlignCenter, code)
-            painter.setPen(QPen(self.color_ceiling_ring, 1.5, Qt.DashLine))
-
-    def _draw_listener(self, painter: QPainter, center: QPointF):
-        """Ponto de escuta central (sofá do ouvinte)."""
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(99, 179, 237, 12))
-        painter.drawEllipse(center, 28, 28)
-        painter.setBrush(QColor(99, 179, 237, 24))
-        painter.drawEllipse(center, 18, 18)
-
-        painter.setPen(QPen(QColor("#63B3ED"), 2.0))
-        painter.setBrush(QBrush(QColor("#1A202C")))
-        painter.drawEllipse(center, 9, 9)
-
-        painter.setPen(QColor("#718096"))
-        painter.setFont(QFont("sans-serif", 7))
-        painter.drawText(QRectF(center.x() - 30, center.y() + 11, 60, 16), Qt.AlignCenter, "OUVINTE")
-
-    def _draw_acoustic_energy_rays(self, painter: QPainter, stem_name: str):
-        """Raios acústicos VBAP 3D ligando o instrumento ativo aos alto-falantes excitados (Zero cálculo no paintEvent)."""
-        plc = self.placements.get(stem_name)
-        if not plc or self._cached_rays_l is None:
+    def _projection_nodes(self, p: SpatialPlacement):
+        if p.is_muted:
             return
+        if p.volume_gain > 0:
+            for side, x in self._nodes(p):
+                yield side, *self._get_node_positions(x, p.y, p.z)
+        elif p.lfe_send > 0:
+            lfe = next(s for s in SPEAKER_COORDINATES_714 if s.is_lfe)
+            anchor = self._speaker_point(lfe) + QPointF(0, 17)
+            yield "LFE", anchor, anchor
 
-        gains_l = self._cached_rays_l
-        gains_r = self._cached_rays_r if self._cached_rays_r is not None else gains_l
-
-        if plc.is_stereo:
-            dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-            _, sphere_pt_l = self._get_node_positions(-dist_x, plc.y, plc.z)
-            _, sphere_pt_r = self._get_node_positions(dist_x, plc.y, plc.z)
-
-            # Raios do lado esquerdo
-            for spk in SPEAKER_COORDINATES_714:
-                gl = gains_l[spk.channel_index]
-                if gl > 0.08:
-                    spk_pt = self._room_to_widget_coords(spk.x, spk.y)
-                    alpha = int(min(255, gl * 220))
-                    color = QColor(0, 229, 255, alpha) if not spk.is_lfe else QColor(255, 61, 0, alpha)
-                    painter.setPen(QPen(color, max(1.0, gl * 3.0), Qt.SolidLine))
-                    painter.drawLine(sphere_pt_l, spk_pt)
-
-            # Raios do lado direito
-            for spk in SPEAKER_COORDINATES_714:
-                gr = gains_r[spk.channel_index]
-                if gr > 0.08:
-                    spk_pt = self._room_to_widget_coords(spk.x, spk.y)
-                    alpha = int(min(255, gr * 220))
-                    color = QColor(0, 229, 255, alpha) if not spk.is_lfe else QColor(255, 61, 0, alpha)
-                    painter.setPen(QPen(color, max(1.0, gr * 3.0), Qt.SolidLine))
-                    painter.drawLine(sphere_pt_r, spk_pt)
-        else:
-            _, sphere_pt = self._get_node_positions(plc.x, plc.y, plc.z)
-
-            for spk in SPEAKER_COORDINATES_714:
-                gain = gains_l[spk.channel_index]
-                if gain > 0.08:
-                    spk_pt = self._room_to_widget_coords(spk.x, spk.y)
-                    alpha = int(min(255, gain * 240))
-                    color = QColor(0, 229, 255, alpha) if not spk.is_lfe else QColor(255, 61, 0, alpha)
-                    pen = QPen(color, max(1.0, gain * 3.5), Qt.SolidLine)
-                    painter.setPen(pen)
-                    painter.drawLine(sphere_pt, spk_pt)
-
-    def _draw_stem_nodes(self, painter: QPainter):
-        """
-        Renderiza cada instrumento ordenado por altura Z, suportando nós simples ou nós gêmeos
-        espelhados (L e R) com ponte estéreo conectada.
-        """
-        sorted_stems = sorted(
-            self.stems.items(),
-            key=lambda item: self.placements.get(item[0], SpatialPlacement(item[0], 0, 0, 0, 0, 0, 1)).z
-        )
-
-        for name, stem in sorted_stems:
-            plc = self.placements.get(name, SpatialPlacement(name, 0, 0, 0, 0.2, 0, 1))
-            is_active = (name == self.active_stem_name)
-            is_hovered = (self.hovered_stem_info is not None and self.hovered_stem_info[0] == name)
-            is_muted = plc.is_muted or plc.volume_gain <= 0.01
-            base_color = self._stem_colors.get(name)
-            if base_color is None:
-                base_color = QColor(stem.color_hex)
-            vu_val = 0.0 if is_muted else self.stems_vu.get(name, 0.0)
-            radius = self.get_visual_radius(plc.z, vu_val)
-
-            if plc.is_stereo:
-                dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-                ground_l, sphere_l = self._get_node_positions(-dist_x, plc.y, plc.z)
-                ground_r, sphere_r = self._get_node_positions(dist_x, plc.y, plc.z)
-
-                # Desenhar Ponte Estéreo conectando os dois lados
-                self._draw_stereo_bridge(painter, sphere_l, sphere_r, base_color, is_active, is_hovered)
-
-                # Desenhar Nós L e R
-                self._draw_single_puck(painter, ground_l, sphere_l, radius, plc.z, vu_val, base_color, is_active, is_hovered, "L", is_muted=is_muted)
-                self._draw_single_puck(painter, ground_r, sphere_r, radius, plc.z, vu_val, base_color, is_active, is_hovered, "R", is_muted=is_muted)
-
-                # Badge Central e Rótulo
-                center_pt = QPointF((sphere_l.x() + sphere_r.x()) / 2.0, (sphere_l.y() + sphere_r.y()) / 2.0)
-                if is_active:
-                    painter.setFont(QFont("sans-serif", 7, QFont.Bold))
-                    badge_text = (f"🪞 ESTÉREO (Mudo)" if is_muted else f"🪞 ESTÉREO 7.1.4 ({int(round(plc.z * 100))}%)")
-                    badge_w = 115.0
-                    badge_rect = QRectF(center_pt.x() - badge_w / 2.0, center_pt.y() - radius - 20.0, badge_w, 15.0)
-
-                    painter.setPen(QPen(QColor("#718096" if is_muted else "#00E5FF"), 1.0))
-                    painter.setBrush(QBrush(QColor(15, 20, 30, 220)))
-                    painter.drawRoundedRect(badge_rect, 3.0, 3.0)
-
-                    painter.setPen(QColor("#A0AEC0" if is_muted else "#00E5FF"))
-                    painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
-
-                # Nome do instrumento abaixo de cada lado ou centralizado
-                painter.setFont(QFont("sans-serif", 8, QFont.Bold if is_active else QFont.Normal))
-                label_color = QColor("#718096") if is_muted else (QColor("#FFFFFF") if is_active else QColor("#A0AEC0"))
-                painter.setPen(label_color)
-                label_rect = QRectF(center_pt.x() - 70, center_pt.y() + radius + 4, 140, 16)
-                disp_text = f"{stem.display_name} (L / R)" if not is_muted else f"{stem.display_name} (Mudo)"
-                painter.drawText(label_rect, Qt.AlignCenter, disp_text)
-
-            else:
-                ground_pt, sphere_pt = self._get_node_positions(plc.x, plc.y, plc.z)
-                self._draw_single_puck(painter, ground_pt, sphere_pt, radius, plc.z, vu_val, base_color, is_active, is_hovered, None, is_muted=is_muted)
-
-                # Badge de Altura Ativa (quando selecionado)
-                if is_active:
-                    painter.setFont(QFont("sans-serif", 7, QFont.Bold))
-                    badge_text = ("● MUDO (0%)" if is_muted else (f"▲ TETO {int(round(plc.z * 100))}%" if plc.z > 0.05 else "● CHÃO (0%)"))
-                    badge_w = 70.0
-                    badge_rect = QRectF(sphere_pt.x() - badge_w / 2.0, sphere_pt.y() - radius - 20.0, badge_w, 15.0)
-
-                    painter.setPen(QPen(QColor("#718096" if is_muted else "#00E5FF"), 1.0))
-                    painter.setBrush(QBrush(QColor(15, 20, 30, 220)))
-                    painter.drawRoundedRect(badge_rect, 3.0, 3.0)
-
-                    painter.setPen(QColor("#A0AEC0" if is_muted else "#00E5FF"))
-                    painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
-
-                # Rótulo com Nome do Instrumento
-                painter.setFont(QFont("sans-serif", 8, QFont.Bold if is_active else QFont.Normal))
-                label_color = QColor("#718096") if is_muted else (QColor("#FFFFFF") if is_active else QColor("#A0AEC0"))
-                painter.setPen(label_color)
-                label_rect = QRectF(sphere_pt.x() - 60, sphere_pt.y() + radius + 3, 120, 16)
-                disp_text = stem.display_name if not is_muted else f"{stem.display_name} (Mudo)"
-                painter.drawText(label_rect, Qt.AlignCenter, disp_text)
-
-    def _draw_stereo_bridge(self, painter: QPainter, pt_l: QPointF, pt_r: QPointF, color: QColor, is_active: bool, is_hovered: bool):
-        """Desenha a conexão de ponte estéreo cintilante entre o lado esquerdo e direito."""
-        path = QPainterPath()
-        path.moveTo(pt_l)
-        # Curva suave para trás ou teto
-        mid_x = (pt_l.x() + pt_r.x()) / 2.0
-        mid_y = (pt_l.y() + pt_r.y()) / 2.0 - 12.0
-        path.quadTo(mid_x, mid_y, pt_r.x(), pt_r.y())
-
-        alpha = 180 if is_active else (120 if is_hovered else 60)
-        pen = QPen(QColor(color.red(), color.green(), color.blue(), alpha), 1.8 if is_active else 1.2, Qt.DashLine)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(path)
-
-    def _draw_single_puck(
-        self,
-        painter: QPainter,
-        ground_pt: QPointF,
-        sphere_pt: QPointF,
-        radius: float,
-        z: float,
-        vu_val: float,
-        base_color: QColor,
-        is_active: bool,
-        is_hovered: bool,
-        puck_side_badge: Optional[str],
-        is_muted: bool = False
-    ):
-        """Renderiza uma bolinha esférica individual com sombra, haste e realce de altura."""
-        # 1. Projeção de Chão & Haste Vertical (Pseudo-3D)
-        if z > 0.04:
-            shadow_w = 12.0 + (1.0 - z) * 6.0
-            shadow_h = shadow_w * 0.45
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(0, 0, 0, 70 if is_muted else 160)))
-            painter.drawEllipse(ground_pt, shadow_w, shadow_h)
-
-            tether_alpha = int((80 + z * 120) * (0.35 if is_muted else 1.0))
-            pen_tether = QPen(QColor(255, 255, 255, tether_alpha), 1.2, Qt.DashLine)
-            painter.setPen(pen_tether)
-            painter.drawLine(ground_pt, sphere_pt)
-
-        # 2. Anéis de Elevação ao Teto (somente se não mudo)
-        if z > 0.35 and not is_muted:
-            elev_alpha = int(z * 170)
-            pen_elev = QPen(QColor(99, 179, 237, elev_alpha), 1.2, Qt.DashLine)
-            painter.setPen(pen_elev)
+    def _draw_projection(self, painter: QPainter, key: str, p: SpatialPlacement) -> None:
+        ev = self._event_by_stem.get(key.removesuffix("::micro"))
+        color = QColor(LANE_COLORS[event_row(ev)] if ev else T.WARM)
+        for side, floor, point in self._projection_nodes(p):
             painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(sphere_pt, radius + 5.0, radius + 5.0)
-            if z > 0.75:
-                painter.drawEllipse(sphere_pt, radius + 10.0, radius + 10.0)
+            painter.setPen(QPen(color, 1, Qt.DotLine))
+            if ev and side != "LFE":
+                sign = -1 if side == "L" else 1
+                x1 = sign*abs(ev.x) if p.is_stereo else ev.x
+                x2 = sign*abs(ev.end_x) if p.is_stereo else ev.end_x
+                start = self._get_node_positions(x1, ev.y, ev.z)[1]
+                end = self._get_node_positions(x2, ev.end_y, ev.end_z)[1]
+                painter.drawLine(start, end)
+                painter.drawEllipse(end, 3.0, 3.0)
+            if p.z > .05:
+                painter.drawLine(floor, point)
+            # Losango e ponto central distinguem um envio breve de uma fonte editável.
+            size = 8.0
+            shape = QPolygonF([point + QPointF(0, -size), point + QPointF(size, 0),
+                               point + QPointF(0, size), point + QPointF(-size, 0)])
+            painter.setPen(QPen(color, 1.8))
+            painter.setBrush(QColor(T.CANVAS))
+            painter.drawPolygon(shape)
+            painter.setBrush(color)
+            painter.drawEllipse(point, 2.0, 2.0)
 
-        # 3. Pulsação Reativa de VU Meter no Nó (somente se não mudo)
-        if vu_val > 0.06 and not is_muted:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), int(vu_val * 32)))
-            painter.drawEllipse(sphere_pt, radius + vu_val * 16.0, radius + vu_val * 16.0)
+    def _projection_at(self, pos: QPointF) -> str | None:
+        for key, p in self.projections.items():
+            for _, _, point in self._projection_nodes(p):
+                if math.hypot(pos.x()-point.x(), pos.y()-point.y()) <= 10:
+                    return key
+        return None
 
-        # 4. Halo de Seleção e Foco Ativo
-        if is_active:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 229, 255, 24))
-            painter.drawEllipse(sphere_pt, radius + 14.0, radius + 14.0)
+    def event(self, event) -> bool:
+        if event.type() == QEvent.ToolTip:
+            key = self._projection_at(QPointF(event.pos()))
+            if key:
+                ev = self._event_by_stem.get(key.removesuffix("::micro"))
+                tip = event_details(ev) if ev else "Projeção de microcoreografia"
+                QToolTip.showText(event.globalPos(), tip, self)
+                return True
+        return super().event(event)
 
-        # 5. Corpo da esfera sem QGradient: sólida quando viva, translúcida tracejada quando muda
-        if is_muted:
-            painter.setPen(QPen(QColor(base_color.red(), base_color.green(), base_color.blue(), 130), 1.2, Qt.DashLine))
-            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 45))
-        elif is_active:
-            painter.setPen(QPen(QColor("#00E5FF"), 2.5))
-            painter.setBrush(base_color)
-        elif is_hovered:
-            painter.setPen(QPen(QColor("#FFFFFF"), 1.8))
-            painter.setBrush(base_color)
-        else:
-            painter.setPen(QPen(QColor(255, 255, 255, 60), 1.0))
-            painter.setBrush(base_color)
+    def _draw_speakers(self, painter: QPainter) -> None:
+        for s in SPEAKER_COORDINATES_714:
+            anchor = self._speaker_point(s)
+            # Etiquetas ficam fora das posições de ancoragem, inclusive FC com voz central.
+            offset = (-19.0 if s.code in ("FL", "FC", "FR") else
+                      17.0 if s.code in ("BL", "BR") else 0.0)
+            pt = anchor + QPointF(0, offset)
+            color = T.COOL if s.z else T.LINE
+            if s.is_lfe:
+                color = T.WARM
+            if s.is_lfe and self.sub_vu and not self.reduced_motion:
+                painter.setPen(QPen(T.tint(T.WARM, 120), 1.4))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(pt, 17 + min(1, self.sub_vu) * 8, 17 + min(1, self.sub_vu) * 8)
+            rect = QRectF(pt.x()-16, pt.y()-10, 32, 20)
+            painter.setPen(QPen(QColor(color), 1, Qt.DashLine if s.z else Qt.SolidLine))
+            painter.setBrush(QColor(T.PANEL_ALT))
+            painter.drawRoundedRect(rect, 6, 6)
+            painter.setPen(QColor(T.WARM if s.is_lfe else T.INK))
+            painter.setFont(QFont(T.MONO, 8))
+            painter.drawText(rect, Qt.AlignCenter, s.code)
 
+    def _draw_source(self, painter: QPainter, name: str) -> None:
+        p = self.placements[name]
+        active = name == self.active_stem_name
+        hovered = bool(self.hovered_stem_info and self.hovered_stem_info[0] == name)
+        vu = self.stems_vu.get(name, self.stems_vu.get(p.source_stem_name or name, 0.0))
+        muted = p.is_muted or p.volume_gain <= 0
+        level = 0.0 if muted or self.reduced_motion else min(1.0, max(0.0, vu))
+        radius = self.get_visual_radius(p.z, level)
+        nodes = self._nodes(p)
+        points = [self._get_node_positions(x, p.y, p.z) for _, x in nodes]
+        color = QColor(self.stems[name].color_hex)
+        if len(points) == 2:
+            painter.setPen(QPen(T.tint(color, 165 if active else 70), 1.2, Qt.DashLine))
+            painter.drawLine(points[0][1], points[1][1])
+        for (side, _), (floor, top) in zip(nodes, points):
+            self._draw_single_puck(painter, floor, top, radius, p.z, level, color,
+                                   active, hovered, side if len(nodes) == 2 else None, muted)
+        if active or hovered:
+            cx = sum(pair[1].x() for pair in points) / len(points)
+            top_y = points[0][1].y()
+            painter.setFont(QFont(T.BODY, 9, QFont.DemiBold))
+            text = self.stems[name].display_name + ("  /  Mudo" if muted else f"  /  Z {round(p.z * 100)}%")
+            width = min(self.width()-8, painter.fontMetrics().horizontalAdvance(text) + 16)
+            x, y = cx-width/2, top_y-radius-24
+            if top_y < self.height() * 0.20 and len(points) == 1:
+                x, y = cx+radius+9, top_y-11
+            rect = QRectF(max(4, min(x, self.width()-width-4)), max(3, y), width, 21)
+            painter.setPen(QPen(QColor(T.ACCENT if active else T.LINE), 1))
+            painter.setBrush(QColor(T.CANVAS))
+            painter.drawRoundedRect(rect, 6, 6)
+            painter.setPen(QColor(T.INK))
+            painter.drawText(rect, Qt.AlignCenter, painter.fontMetrics().elidedText(text, Qt.ElideRight, int(width)-6))
+
+    def _draw_single_puck(self, painter: QPainter, ground_pt: QPointF, sphere_pt: QPointF,
+                          radius: float, z: float, vu_val: float, base_color: QColor,
+                          is_active: bool, is_hovered: bool, puck_side_badge: str | None,
+                          is_muted: bool = False) -> None:
+        # Apenas preenchimentos sólidos no hot path de Shiboken 6.12.
+        if z > 0.03:
+            painter.setPen(QPen(QColor(T.MUTED), 1, Qt.DotLine))
+            painter.drawLine(ground_pt, sphere_pt)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(ground_pt, 5.0, 2.0)
+        if vu_val > 0.04:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(T.tint(base_color, 100), 1.0))
+            painter.drawEllipse(sphere_pt, radius+2.0+vu_val*4.0, radius+2.0+vu_val*4.0)
+        color = QColor(T.LINE) if is_muted else base_color
+        painter.setPen(QPen(QColor(T.INK) if is_active or is_hovered else color, 2.0 if is_active else 1.0))
+        painter.setBrush(color if is_active or is_hovered else QColor(T.PANEL_ALT))
         painter.drawEllipse(sphere_pt, radius, radius)
-
-        # 6. Letra de Lado (L/R) ou Porcentagem de Altura ou Indicador Mudo
-        painter.setFont(QFont("sans-serif", 8, QFont.Bold))
-        text_rect = QRectF(sphere_pt.x() - radius, sphere_pt.y() - radius, radius * 2, radius * 2)
-
-        if is_muted:
-            painter.setPen(QColor(255, 255, 255, 110))
-            badge_muted = f"{puck_side_badge} ✕" if puck_side_badge else "✕"
-            painter.drawText(text_rect, Qt.AlignCenter, badge_muted)
-        elif puck_side_badge:
-            painter.setPen(QColor("#FFFFFF"))
-            painter.drawText(text_rect, Qt.AlignCenter, puck_side_badge)
-        elif radius >= 16.0:
-            painter.setPen(QColor("#FFFFFF"))
-            pct_text = f"{int(round(z * 100))}%"
-            painter.drawText(text_rect, Qt.AlignCenter, pct_text)
-
-    # --- Interatividade do Mouse (Seleção, Arraste Espelhado e Scroll de Altura) ---
-    def _find_stem_at_pos(self, pos: QPointF) -> Optional[Tuple[str, str]]:
-        """
-        Localiza o stem e o lado sob o cursor:
-        Retorna (stem_name, "L"|"R"|"C") ou None.
-        """
-        clicked = None
-        min_dist = float("inf")
-
-        sorted_stems = sorted(
-            self.stems.items(),
-            key=lambda item: self.placements.get(item[0], SpatialPlacement(item[0], 0, 0, 0, 0, 0, 1)).z,
-            reverse=True
-        )
-
-        for name, stem in sorted_stems:
-            plc = self.placements.get(name)
-            if not plc:
-                continue
-            vu_val = self.stems_vu.get(name, 0.0)
-            radius = self.get_visual_radius(plc.z, vu_val)
-            hit_bound = max(radius + 8.0, 22.0)
-
-            if plc.is_stereo:
-                dist_x = abs(plc.x) if abs(plc.x) > 0.05 else 0.50
-                _, sphere_l = self._get_node_positions(-dist_x, plc.y, plc.z)
-                _, sphere_r = self._get_node_positions(dist_x, plc.y, plc.z)
-
-                d_l = math.hypot(pos.x() - sphere_l.x(), pos.y() - sphere_l.y())
-                if d_l <= hit_bound and d_l < min_dist:
-                    min_dist = d_l
-                    clicked = (name, "L")
-
-                d_r = math.hypot(pos.x() - sphere_r.x(), pos.y() - sphere_r.y())
-                if d_r <= hit_bound and d_r < min_dist:
-                    min_dist = d_r
-                    clicked = (name, "R")
+        if puck_side_badge or is_muted:
+            painter.setFont(QFont(T.MONO, 8, QFont.DemiBold))
+            if is_active or is_hovered:
+                text = T.DARK_TEXT if color.lightnessF() > 0.46 else T.INK
             else:
-                _, sphere_pt = self._get_node_positions(plc.x, plc.y, plc.z)
-                dist = math.hypot(pos.x() - sphere_pt.x(), pos.y() - sphere_pt.y())
-                if dist <= hit_bound and dist < min_dist:
-                    min_dist = dist
-                    clicked = (name, "C")
+                text = T.INK
+            painter.setPen(QColor(text))
+            painter.drawText(QRectF(sphere_pt.x()-radius, sphere_pt.y()-radius, 2*radius, 2*radius),
+                             Qt.AlignCenter, "M" if is_muted else puck_side_badge)
 
-        return clicked
+    def _find_stem_at_pos(self, pos: QPointF) -> tuple[str, str] | None:
+        selected = None
+        shortest = float("inf")
+        for name in self.stems:
+            p = self.placements[name]
+            for side, x in self._nodes(p):
+                point = self._get_node_positions(x, p.y, p.z)[1]
+                d = math.hypot(pos.x()-point.x(), pos.y()-point.y())
+                if d < shortest and d <= max(22.0, self.get_visual_radius(p.z)+8.0):
+                    shortest, selected = d, (name, side)
+        return selected
 
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            pos = event.position()
-            target = self._find_stem_at_pos(pos)
+    def _move(self, name: str, x: float, y: float, z: float) -> None:
+        if name in self.stems:
+            self.update_placement(name, x, y, z)
+            self.placement_changed.emit(name, x, y, z)
 
-            if target:
-                stem_name, side = target
-                changed = (self.active_stem_name != stem_name)
-                self.active_stem_name = stem_name
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._projection_at(event.position()):
+            event.accept()
+            return
+        target = self._find_stem_at_pos(event.position())
+        if target:
+            self.set_active_stem(target[0])
+            if event.button() == Qt.LeftButton:
                 self._is_dragging = True
-                self._drag_puck_side = side
                 self.setCursor(Qt.ClosedHandCursor)
-                self._update_rays_cache()
-                if changed:
-                    self.stem_selected.emit(stem_name)
-                self.update()
-        elif event.button() == Qt.RightButton:
-            pos = event.position()
-            target = self._find_stem_at_pos(pos)
-            if target:
-                stem_name, _ = target
-                if self.active_stem_name != stem_name:
-                    self.active_stem_name = stem_name
-                    self._update_rays_cache()
-                    self.stem_selected.emit(stem_name)
-                    self.update()
+        super().mousePressEvent(event)
 
-    def contextMenuEvent(self, event):
-        pos = event.pos()
-        target = self._find_stem_at_pos(QPointF(pos))
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #1A1D24;
-                color: #E2E8F0;
-                border: 1px solid #2E3444;
-                border-radius: 6px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 20px;
-                border-radius: 4px;
-                font-size: 11px;
-            }
-            QMenu::item:selected {
-                background-color: #00E5FF;
-                color: #000000;
-                font-weight: bold;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: #2E3444;
-                margin: 4px 8px;
-            }
-        """)
-
-        target_name = target[0] if target else self.active_stem_name
-
-        if target_name and target_name in self.placements:
-            plc = self.placements[target_name]
-            disp_name = target_name
-            if target_name in self.stems:
-                disp_name = self.stems[target_name].display_name
-
-            act_title = menu.addAction(f"📍 {disp_name}")
-            act_title.setEnabled(False)
-            menu.addSeparator()
-
-            act_stereo = menu.addAction("🪞 Espelhamento Estéreo (L / R)  [D]")
-            act_stereo.setCheckable(True)
-            act_stereo.setChecked(plc.is_stereo)
-            act_stereo.triggered.connect(lambda: self.toggle_stereo_mirror(target_name))
-
-            menu.addSeparator()
-
-            act_copy = menu.addAction("📋 Copiar Elemento  [Ctrl+C]")
-            act_copy.triggered.connect(lambda: self.copy_requested.emit(target_name))
-
-            act_dup = menu.addAction("➕ Duplicar / Nova Fonte 3D  [Ctrl+V]")
-            act_dup.triggered.connect(lambda: self.duplicate_requested.emit(target_name))
-
-            if plc.source_stem_name not in (None, target_name) or "::" in target_name:
-                act_del = menu.addAction("🗑️ Excluir Instância  [Del]")
-                act_del.triggered.connect(lambda: self.delete_requested.emit(target_name))
-
-            menu.addSeparator()
-
-            act_center = menu.addAction("🎯 Centralizar (0, 0, 0)  [0]")
-            act_center.triggered.connect(lambda: self._reset_placement_pos(target_name))
-
-            act_up = menu.addAction("▲ Subir Altura Z (+10%)  [↑]")
-            act_up.triggered.connect(lambda: self._adjust_placement_z(target_name, 0.10))
-
-            act_down = menu.addAction("▼ Baixar Altura Z (-10%)  [↓]")
-            act_down.triggered.connect(lambda: self._adjust_placement_z(target_name, -0.10))
-        else:
-            act_paste = menu.addAction("➕ Colar Elemento Copiado  [Ctrl+V]")
-            act_paste.triggered.connect(self.paste_requested.emit)
-
-        menu.exec(event.globalPos())
-
-    def _reset_placement_pos(self, stem_name: str):
-        if stem_name in self.placements:
-            plc = self.placements[stem_name]
-            plc.x, plc.y, plc.z = 0.0, 0.0, 0.0
-            self.placement_changed.emit(stem_name, 0.0, 0.0, 0.0)
-            self._update_rays_cache()
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        pos = event.position()
+        name = self.active_stem_name
+        if self._is_dragging and name in self.placements:
+            p = self.placements[name]
+            x, y = self._widget_to_room_coords(pos.x(), pos.y()+p.z*34)
+            self._move(name, max(0.10, abs(x)) if p.is_stereo else x, y, p.z)
+            return
+        if self._projection_at(pos):
+            self.hovered_stem_info = None
+            self.setCursor(Qt.WhatsThisCursor)
+            self.update()
+            return
+        target = self._find_stem_at_pos(pos)
+        self.setCursor(Qt.OpenHandCursor if target else Qt.ArrowCursor)
+        if target != self.hovered_stem_info:
+            self.hovered_stem_info = target
             self.update()
 
-    def _adjust_placement_z(self, stem_name: str, delta_z: float):
-        if stem_name in self.placements:
-            plc = self.placements[stem_name]
-            plc.z = max(0.0, min(1.0, round(plc.z + delta_z, 3)))
-            self.placement_changed.emit(stem_name, plc.x, plc.y, plc.z)
-            self._update_rays_cache()
-            self.update()
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._is_dragging = False
+        self.setCursor(Qt.OpenHandCursor if self._find_stem_at_pos(event.position()) else Qt.ArrowCursor)
+        super().mouseReleaseEvent(event)
 
-    def keyPressEvent(self, event: QKeyEvent):
-        key = event.key()
-        active = self.active_stem_name
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if self._projection_at(event.position()):
+            event.accept()
+            return
+        target = self._find_stem_at_pos(event.position())
+        if target and event.button() == Qt.LeftButton:
+            self.toggle_stereo_mirror(target[0])
 
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if self._projection_at(event.position()):
+            event.accept()
+            return
+        target = self._find_stem_at_pos(event.position())
+        name = target[0] if target else self.active_stem_name
+        if name in self.placements:
+            self.set_active_stem(name)
+            p = self.placements[name]
+            self._move(name, p.x, p.y, max(0.0, min(1.0, p.z + event.angleDelta().y()/2400)))
+            event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        key, name = event.key(), self.active_stem_name
         if key == Qt.Key_Space:
             self.playback_toggle_requested.emit()
-            event.accept()
-        elif key == Qt.Key_D:
-            if active:
-                self.toggle_stereo_mirror(active)
-                event.accept()
-        elif key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
-            if active:
-                self.copy_requested.emit(active)
-                event.accept()
+        elif key in (Qt.Key_Left, Qt.Key_Right):
+            self.seek_requested.emit(5.0 if key == Qt.Key_Right else -5.0)
         elif key == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
-            if active:
-                self.duplicate_requested.emit(active)
+            self.paste_requested.emit()
+        elif name and name in self.placements:
+            p = self.placements[name]
+            if key == Qt.Key_D:
+                self.toggle_stereo_mirror(name)
+            elif key == Qt.Key_0:
+                self._move(name, 0.0, 0.0, 0.0)
+            elif key in (Qt.Key_Up, Qt.Key_Down):
+                self._move(name, p.x, p.y, max(0.0, min(1.0, p.z + (0.05 if key == Qt.Key_Up else -0.05))))
+            elif key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
+                self.copy_requested.emit(name)
+            elif key in (Qt.Key_Delete, Qt.Key_Backspace) and "::" in name:
+                self.delete_requested.emit(name)
             else:
-                self.paste_requested.emit()
-            event.accept()
-        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
-            if active and ("::" in active or (active in self.placements and self.placements[active].source_stem_name not in (None, active))):
-                self.delete_requested.emit(active)
-                event.accept()
-        elif key == Qt.Key_0:
-            if active:
-                self._reset_placement_pos(active)
-                event.accept()
-        elif key == Qt.Key_Up:
-            if active:
-                self._adjust_placement_z(active, 0.05)
-                event.accept()
-        elif key == Qt.Key_Down:
-            if active:
-                self._adjust_placement_z(active, -0.05)
-                event.accept()
-        elif key == Qt.Key_Left:
-            self.seek_requested.emit(-5.0)
-            event.accept()
-        elif key == Qt.Key_Right:
-            self.seek_requested.emit(5.0)
-            event.accept()
+                super().keyPressEvent(event)
+                return
         else:
             super().keyPressEvent(event)
+            return
+        event.accept()
 
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            pos = event.position()
-            target = self._find_stem_at_pos(pos)
-            if target:
-                stem_name, _ = target
-                self.toggle_stereo_mirror(stem_name)
-                event.accept()
-                return
-        super().mouseDoubleClickEvent(event)
-
-    def mouseMoveEvent(self, event: QMouseEvent):
-        try:
-            pos = event.position()
-
-            if self._is_dragging and self.active_stem_name and self.active_stem_name in self.placements:
-                plc = self.placements[self.active_stem_name]
-                y_lift = plc.z * 18.0
-                rx, ry = self._widget_to_room_coords(pos.x(), pos.y() + y_lift)
-
-                if plc.is_stereo:
-                    new_x = max(0.10, min(1.0, abs(rx)))
-                    new_y = ry
-                else:
-                    new_x = rx
-                    new_y = ry
-
-                # Throttling inteligente: só propaga se houve deslocamento real (> 0.005)
-                dx = new_x - plc.x
-                dy = new_y - plc.y
-                if (dx * dx + dy * dy) > 0.000025:
-                    plc.x = new_x
-                    plc.y = new_y
-                    self.placement_changed.emit(self.active_stem_name, plc.x, plc.y, plc.z)
-                    self.update()
-            else:
-                hovered = self._find_stem_at_pos(pos)
-                if hovered != self.hovered_stem_info:
-                    self.hovered_stem_info = hovered
-                    if hovered:
-                        self.setCursor(Qt.PointingHandCursor)
-                    else:
-                        self.setCursor(Qt.ArrowCursor)
-                    self.update()
-        except Exception as e:
-            # Blindagem absoluta contra crash de mouse
-            pass
-
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self._is_dragging = False
-            if self.hovered_stem_info:
-                self.setCursor(Qt.PointingHandCursor)
-            else:
-                self.setCursor(Qt.ArrowCursor)
-
-    def wheelEvent(self, event: QWheelEvent):
-        """
-        Ajusta a ALTURA (Z) do instrumento (e o raio proporcional de visualização).
-        Afeta ambos os lados no modo estéreo simultaneamente.
-        """
-        try:
-            pos = event.position()
-            target = self._find_stem_at_pos(pos)
-            target_stem = target[0] if target else self.active_stem_name
-
-            if target_stem and target_stem in self.placements:
-                if target_stem != self.active_stem_name:
-                    self.active_stem_name = target_stem
-                    self.stem_selected.emit(target_stem)
-
-                delta = event.angleDelta().y()
-                if delta != 0:
-                    step = (delta / 120.0) * 0.05
-                    plc = self.placements[target_stem]
-                    new_z = max(0.0, min(1.0, round(plc.z + step, 3)))
-                    plc.z = new_z
-
-                    self.placement_changed.emit(target_stem, plc.x, plc.y, plc.z)
-                    self.update()
-                    event.accept()
-                    return
-        except Exception:
-            pass
-
-        super().wheelEvent(event)
+    def contextMenuEvent(self, event) -> None:
+        if self._projection_at(QPointF(event.pos())):
+            event.accept()
+            return
+        target = self._find_stem_at_pos(QPointF(event.pos()))
+        name = target[0] if target else self.active_stem_name
+        menu = QMenu(self)
+        if name in self.placements:
+            menu.addAction("Espelhar em estéreo", lambda: self.toggle_stereo_mirror(name))
+            menu.addAction("Copiar posição", lambda: self.copy_requested.emit(name))
+            menu.addAction("Duplicar fonte", lambda: self.duplicate_requested.emit(name))
+            menu.addAction("Centralizar", lambda: self._move(name, 0.0, 0.0, 0.0))
+            if "::" in name:
+                menu.addAction("Excluir cópia", lambda: self.delete_requested.emit(name))
+        menu.addAction("Colar fonte", self.paste_requested.emit)
+        menu.exec(event.globalPos())

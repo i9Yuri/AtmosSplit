@@ -1,1688 +1,1234 @@
-"""
-AtmosSplit — Janela Principal Desktop (PySide6)
-Interface intuitiva da sala 7.1.4 com isolamento total de processos:
-- Worker de IA executado em subprocesso desacoplado via QProcess
-- Prioridade estrita (nice 19) e afinidade (núcleos 0 e 1 livres para SO/KDE)
-- Encerramento estrito de processos zumbis/órfãos via psutil
-- Polling atômico a 30 FPS desacoplado da thread de áudio (Zero XRUNs)
-- Seletor dinâmico de saída de áudio (PipeWire, Headset, HDMI TV/JBL)
-- Controle de Volume Master integrado com display percentual
-- Gerenciador e limpador visual de cache de stems
-- Abertura direta com dois cliques em arquivos de áudio via linha de comando/desktop
-- Espelhamento estéreo (L/R) com nós gêmeos (tecla 'D' ou clique duplo)
-- Automação dinâmica temporal por trechos (TimelineWidget)
-- Atalhos rápidos: Espaço (Play), 1-5 (Presets), M (Mute), S (Solo), D (Estéreo), 0 (Centralizar), Setas (Seek/Altura)
-"""
+"""Estação de edição espacial. Os processos de estúdio nunca recebem widgets ou buffers do PortAudio."""
 
 from __future__ import annotations
 
-import os
-import sys
-import time
+import copy
+import ctypes
 import json
 import logging
-import copy
+import os
+import sys
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
-import psutil
-import numpy as np
-import soundfile as sf
-from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QProcess
+from PySide6.QtCore import (
+    QIODevice, QProcess, QProcessEnvironment, QSaveFile, QSettings, QSignalBlocker,
+    QStandardPaths, Qt, QThread, QTimer,
+)
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QSplitter,
-    QLabel,
-    QPushButton,
-    QFileDialog,
-    QProgressBar,
-    QScrollArea,
-    QComboBox,
-    QMessageBox,
-    QInputDialog,
-    QDialog,
-    QSlider,
-    QStyle,
-    QFrame,
-    QTableWidget,
-    QTableWidgetItem,
-    QHeaderView,
-)
-from PySide6.QtGui import (
-    QIcon,
-    QFont,
-    QColor,
-    QPixmap,
-    QImage,
-    QKeyEvent,
-    QDragEnterEvent,
-    QDropEvent,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow,
+    QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter,
+    QStyle, QStyleOptionProgressBar, QStylePainter,
+    QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..acquisition.file_source import load_audio_file, AudioSource
-from ..acquisition.search_source import SearchSourceEngine, SearchResultItem
-from ..acquisition.probe_verifier import verify_audio_file
-from ..separation.stem_engine import DeepStemEngine, StemTrack, SeparationResult
+from ..playback.directframe_bridge import DirectFrameBridge
+from ..playback.exporter import ExportFormat
+from ..playback.samsung_dlna_bridge import SamsungDLNABridge
 from ..separation.cache_manager import StemCacheManager
-from ..spatial.acoustic_analyzer import AcousticAnalyzer
-from ..spatial.auto_director import AutoAtmosDirector, DirectorPreset, SpatialPlacement
-from ..spatial.binaural_hrtf import BinauralHRTFEngine
-from ..spatial.master_renderer import MasterRenderer714, RenderConfig
+from ..separation.stem_engine import DeepStemEngine, StemTrack
+from ..spatial.auto_director import DirectorPreset, SpatialPlacement
 from ..spatial.live_player import LiveSpatialPlayer
 from ..spatial.timeline_manager import SpatialTimelineManager
-from ..spatial.song_intelligence import SongStructureIntelligence
-from ..playback.exporter import AudioExporter714, ExportFormat
-from ..playback.directframe_bridge import DirectFrameBridge
-from ..playback.samsung_dlna_bridge import SamsungDLNABridge
+from . import theme as T
+from .micro_event_lane import event_details, event_title
 from .room_view_714 import RoomView714
 from .stem_card import StemControlCard
+from .studio_jobs import pack_sections, unpack_sections
 from .timeline_widget import TimelineWidget
 
 log = logging.getLogger(__name__)
+ROOT = Path(__file__).resolve().parents[2]
+BUSY_DROP_NOTICE = "Uma operação já está em andamento. Aguarde ou cancele antes de abrir nova faixa."
+PREVIEW_PROGRESS = 95
+AUDIO_FILTER = "Áudio (*.flac *.wav *.alac *.aac *.mp3 *.m4a *.mp4 *.mkv *.opus *.ogg *.aif *.aiff);;Todos os arquivos (*)"
+EXPORT_FORMATS = {
+    "Dolby Atmos para TV e DLNA (*.mp4)": ExportFormat.MP4_ATMOS_JOC_714,
+    "PCM 7.1.4 para DirectFrame (*.mkv)": ExportFormat.MKV_LPCM_714,
+    "Dolby Atmos em Matroska (*.mkv)": ExportFormat.MKV_ATMOS_JOC_714,
+    "Master PCM 7.1.4 (*.wav)": ExportFormat.WAV_714,
+    "Fluxo E-AC-3 JOC (*.ec3)": ExportFormat.EC3_ATMOS_714,
+}
 
 
-def _immunize_cpython_none_refcount():
-    """
-    Blindagem ativa contra o bug de refcount leak de C extensions / Shiboken6 em Linux.
-    Garante que a contagem de referências do singleton None nunca chegue a zero,
-    impedindo fatal errors de 'none_dealloc: deallocating None' e SIGABRT.
-    """
-    try:
-        import ctypes
+def _immunize_cpython_none_refcount() -> None:
+    # Shiboken 6.12 sobre CPython 3.11: nenhuma manipulação de objetos imortais em 3.12+.
+    if sys.platform == "linux" and sys.implementation.name == "cpython" and sys.version_info[:2] == (3, 11):
         refcnt = ctypes.c_ssize_t.from_address(id(None))
         if refcnt.value < 500_000_000:
             refcnt.value += 1_000_000_000
-    except Exception:
-        pass
 
 
-def _install_crash_shield():
-    """Escudo global contra encerramento inesperado por exceções não tratadas no Qt."""
-    _immunize_cpython_none_refcount()
-
-    def _safe_excepthook(exc_type, exc_val, exc_tb):
-        import traceback
-        tb_str = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
-        log.error("Escudo Global Antigravity interceptou exceção no loop de eventos:\n%s", tb_str)
-
-    sys.excepthook = _safe_excepthook
+def _label(value: str, style: str = "") -> QLabel:
+    label = QLabel(value)
+    label.setTextFormat(Qt.PlainText)
+    label.setObjectName(style)
+    return label
 
 
-_install_crash_shield()
+def _clock(seconds: float) -> str:
+    minutes, sec = divmod(int(max(0, seconds)), 60)
+    return f"{minutes:02d}:{sec:02d}"
+
+
+def _panel(name: str, margin: int = 14) -> tuple[QWidget, QVBoxLayout]:
+    panel = QWidget()
+    panel.setObjectName(name)
+    box = QVBoxLayout(panel)
+    box.setContentsMargins(margin, margin, margin, margin)
+    box.setSpacing(10)
+    return panel, box
+
+
+class StudioProgressBar(QProgressBar):
+    def paintEvent(self, event) -> None:
+        painter = QStylePainter(self)
+        option = QStyleOptionProgressBar()
+        self.initStyleOption(option)
+        # A porcentagem fica ao lado da trilha, com contraste constante.
+        label_width = painter.fontMetrics().horizontalAdvance("100%") + 12
+        bounds = option.rect
+        option.rect = bounds.adjusted(0, (bounds.height() - 12) // 2, -label_width, 0)
+        option.rect.setHeight(12)
+        option.textVisible = False
+        painter.drawControl(QStyle.CE_ProgressBar, option)
+        if self.isTextVisible():
+            painter.setPen(QColor(T.INK))
+            painter.drawText(bounds.adjusted(bounds.width() - label_width, 0, 0, 0),
+                             Qt.AlignRight | Qt.AlignVCenter, option.text)
+
+
+class SessionThread(QThread):
+    """I/O local e preparação de um novo monitor ainda desconectado da reprodução."""
+
+    def __init__(self, fn, parent: QWidget):
+        super().__init__(parent)
+        self.fn = fn
+        self.result = None
+        self.error = ""
+
+    def run(self) -> None:
+        try:
+            self.result = self.fn()
+        except Exception as exc:
+            self.error = str(exc)
+            log.exception("Falha no trabalho de sessão")
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, cache_manager: StemCacheManager | None = None, settings: QSettings | None = None,
+                 session_dir: Path | None = None):
         super().__init__()
-        self.setWindowTitle("AtmosSplit — Montador Espacial Dolby Atmos 7.1.4")
-        self.resize(1280, 860)
+        _immunize_cpython_none_refcount()
+        self.setWindowTitle("AtmosSplit — Estúdio espacial 7.1.4")
+        self.setWindowIcon(QIcon(str(ROOT / "assets/icon.png")))
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.StrongFocus)
-
-        icon_path = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.png"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
-
-        self.cache_manager = StemCacheManager()
-        self.stem_engine = DeepStemEngine(cache_manager=self.cache_manager)
-        self.search_engine = SearchSourceEngine()
-        self.renderer = MasterRenderer714()
-        self.binaural_engine = BinauralHRTFEngine()
-        self.directframe_bridge = DirectFrameBridge()
-        self.dlna_bridge = SamsungDLNABridge()
-
-        self.current_source: Optional[AudioSource] = None
-        self.current_stems: List[StemTrack] = []
-        self.current_placements: Dict[str, SpatialPlacement] = {}
-        self._placement_clipboard: Optional[SpatialPlacement] = None
-        self._stem_profiles = {}
-        self.stem_cards: Dict[str, StemControlCard] = {}
-        self._stem_audio_by_instance: Dict[str, StemTrack] = {}
-
-        # Gerenciador de Automação Temporal por Trechos
-        self.timeline_manager = SpatialTimelineManager(total_duration_s=180.0)
-
-        # Subprocesso de IA desacoplado (Zero congelamento de interface)
-        self.separation_process: Optional[QProcess] = None
-        self._current_task_info: Optional[Dict[str, str]] = None
-        self._last_worker_error: Optional[str] = None
-        self._user_cancelled_separation: bool = False
-
-        # Player de áudio ao vivo de ultra-baixa latência com timeline conectada
-        self.live_player = LiveSpatialPlayer(sample_rate=48000)
-        self.live_player.set_timeline_manager(self.timeline_manager)
-
-        self._init_theme_and_ui()
-
-        # Timer desacoplado a ~33 FPS para atualização suave da GUI sem travar o áudio
+        self.cache_manager = cache_manager or StemCacheManager()
+        self.settings = settings or QSettings("AtmosSplit", "AtmosSplit")
+        self.session_dir = session_dir or Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)) / "sessions"
+        self.current_stems: list[StemTrack] = []
+        self.session: dict = {}
+        self._sources: dict[str, StemTrack] = {}
+        self._clipboard: SpatialPlacement | None = None
+        self._inspector: StemControlCard | None = None
+        self._dirty = False
+        self._manual = False
+        self._proc: QProcess | None = None
+        self._thread: SessionThread | None = None
+        self._device_scan: SessionThread | None = None
+        self._task: str | None = None
+        self._closing = self._cancelled = False
+        self._preview_ui: tuple | None = None
+        self._caption_events: tuple = ()
+        self._caption_recent = False
+        self._export_stage = None
+        self._profile = self.settings.value("monitor/profile", "jbl")
+        if self._profile not in ("jbl", "studio"):
+            self._profile = "jbl"
+        self._current_theme = str(self.settings.value("ui/theme", "amoled"))
+        if self._current_theme not in T.THEMES:
+            self._current_theme = "amoled"
+        T.set_active_theme(self._current_theme)
+        self.timeline_manager = SpatialTimelineManager(1)
+        self.live_player = LiveSpatialPlayer(sample_rate=48000, profile=self._profile)
+        self.setStyleSheet(T.style_sheet(self._current_theme))
+        self._build()
         self.ui_poll_timer = QTimer(self)
-        self.ui_poll_timer.setInterval(30)
+        self.ui_poll_timer.setTimerType(Qt.PreciseTimer)
+        self.ui_poll_timer.setInterval(100 if self.reduced_motion.isChecked() else 16)
         self.ui_poll_timer.timeout.connect(self._poll_audio_state)
         self.ui_poll_timer.start()
+        self.save_timer = QTimer(self)
+        self.save_timer.setSingleShot(True)
+        self.save_timer.setInterval(480)
+        self.save_timer.timeout.connect(self._save_arrangement)
+        self._sync_enabled()
+        size = self.screen().availableGeometry().size()
+        self.resize(min(1630, size.width()-16), min(950, size.height()-58))
+        QTimer.singleShot(0, self._discover_devices)
 
-        # Atualizar badge de cache inicial
-        self._refresh_cache_button_label()
+    @property
+    def current_placements(self) -> dict[str, SpatialPlacement]:
+        return self.timeline_manager.get_active_edit_section().placements
 
-        # Verificação de arquivo passado por argumento (ex: duplo clique ou linha de comando)
-        self._check_initial_arguments()
+    def _build(self) -> None:
+        central, layout = _panel("Studio", 0)
+        self.setCentralWidget(central)
+        layout.setSpacing(0)
+        header, top = _panel("SessionHeader", 0)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(16, 12, 16, 10)
+        bar.setSpacing(12)
+        bar.addWidget(_label("AtmosSplit", "Brand"))
+        bar.addWidget(_label("Estúdio espacial 7.1.4", "Subtle"))
+        bar.addSpacing(16)
+        self.track_label = _label("Sessão sem faixa", "Heading")
+        self.track_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        bar.addWidget(self.track_label, 1)
 
-    def _check_initial_arguments(self):
-        """Se o usuário abriu um arquivo diretamente com AtmosSplit, carrega-o automaticamente."""
-        args = sys.argv[1:]
-        for arg in args:
-            p = Path(arg)
-            if p.exists() and p.is_file() and p.suffix.lower() in [".flac", ".wav", ".alac", ".mp3", ".m4a", ".opus", ".ogg"]:
-                QTimer.singleShot(250, lambda path=str(p): self._load_and_process_audio_path(path))
-                break
+        self.btn_theme = QPushButton()
+        self.btn_theme.setObjectName("ThemeToggle")
+        self.btn_theme.setCursor(Qt.PointingHandCursor)
+        self.btn_theme.setFocusPolicy(Qt.NoFocus)
+        self.btn_theme.clicked.connect(self._toggle_theme)
+        self._update_theme_button()
+        bar.addWidget(self.btn_theme)
 
-    def _init_theme_and_ui(self):
-        self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #0F1015;
-                color: #E2E8F0;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            }
-            QFrame#HeaderBar {
-                background-color: #16181F;
-                border-bottom: 1px solid #232734;
-                padding: 10px 16px;
-            }
-            QFrame#PlayerBar {
-                background-color: #16181F;
-                border-top: 1px solid #232734;
-                padding: 10px 16px;
-            }
-            QPushButton {
-                background-color: #1F232D;
-                border: 1px solid #2E3444;
-                border-radius: 6px;
-                color: #E2E8F0;
-                font-weight: 600;
-                font-size: 12px;
-                padding: 7px 14px;
-            }
-            QPushButton:hover {
-                background-color: #2D3444;
-                border-color: #4A5568;
-                color: #FFFFFF;
-            }
-            QPushButton:pressed {
-                background-color: #1A1F29;
-            }
-            QPushButton#BtnPrimary {
-                background-color: #00E5FF;
-                border: 1px solid #00B4D8;
-                color: #000000;
-            }
-            QPushButton#BtnPrimary:hover {
-                background-color: #18FFFF;
-            }
-            QPushButton#BtnJBL {
-                background-color: #FF5722;
-                border: 1px solid #E64A19;
-                color: #FFFFFF;
-            }
-            QPushButton#BtnJBL:hover {
-                background-color: #FF7043;
-            }
-            QPushButton#BtnQuickExport {
-                background-color: #28A745;
-                border: 1px solid #218838;
-                color: #FFFFFF;
-            }
-            QPushButton#BtnQuickExport:hover {
-                background-color: #34CE57;
-            }
-            QPushButton#BtnCancel {
-                background-color: #E53E3E;
-                border: 1px solid #C53030;
-                color: #FFFFFF;
-                font-size: 11px;
-                padding: 3px 10px;
-            }
-            QPushButton#BtnCancel:hover {
-                background-color: #FC8181;
-            }
-            QPushButton#BtnCache {
-                background-color: #202430;
-                border: 1px solid #323A4D;
-                color: #A0AEC0;
-                font-size: 11px;
-                padding: 4px 10px;
-            }
-            QPushButton#BtnCache:hover {
-                background-color: #2D3448;
-                color: #FFFFFF;
-            }
-            QComboBox {
-                background-color: #1F232D;
-                border: 1px solid #2E3444;
-                border-radius: 6px;
-                color: #E2E8F0;
-                padding: 5px 10px;
-                font-size: 11px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1F232D;
-                selection-background-color: #2D3748;
-                color: #E2E8F0;
-            }
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QProgressBar {
-                background-color: #16181F;
-                border: 1px solid #2E3444;
-                border-radius: 4px;
-                text-align: center;
-                color: #A0AEC0;
-                font-size: 11px;
-                height: 16px;
-            }
-            QProgressBar::chunk {
-                background-color: #00E5FF;
-                border-radius: 3px;
-            }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #2D3748;
-                border-radius: 2px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #00E5FF;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #FFFFFF;
-                border: 1px solid #00B4D8;
-                width: 12px;
-                height: 12px;
-                margin: -4px 0;
-                border-radius: 6px;
-            }
-        """)
-
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        # 1. Header
-        header = self._create_header()
-        main_layout.addWidget(header)
-
-        # Barra de Progresso e Botão Cancelar
-        self.progress_container = QWidget()
-        prog_layout = QHBoxLayout(self.progress_container)
-        prog_layout.setContentsMargins(16, 4, 16, 4)
-        prog_layout.setSpacing(8)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        prog_layout.addWidget(self.progress_bar, stretch=1)
-
-        self.btn_cancel_sep = QPushButton("✖ Cancelar")
-        self.btn_cancel_sep.setObjectName("BtnCancel")
-        self.btn_cancel_sep.clicked.connect(self._cancel_separation_task)
-        prog_layout.addWidget(self.btn_cancel_sep)
-
-        self.progress_container.setVisible(False)
-        main_layout.addWidget(self.progress_container)
-
-        # 2. Splitter Central
-        content_splitter = QSplitter(Qt.Horizontal)
-        content_splitter.setHandleWidth(2)
-
-        # Painel Esquerdo (Stems)
-        left_panel = self._create_stems_panel()
-        content_splitter.addWidget(left_panel)
-
-        # Painel Central (Sala 7.1.4)
-        self.room_view = RoomView714()
-        self.room_view.placement_changed.connect(self._on_room_placement_changed)
-        self.room_view.stereo_toggled.connect(self._on_room_stereo_toggled)
-        self.room_view.stem_selected.connect(self._on_room_stem_selected)
-        self.room_view.duplicate_requested.connect(self._duplicate_placement)
-        self.room_view.delete_requested.connect(self._delete_placement)
-        self.room_view.copy_requested.connect(self._copy_placement)
-        self.room_view.paste_requested.connect(self._paste_placement)
-        self.room_view.playback_toggle_requested.connect(self._toggle_preview_playback)
-        self.room_view.seek_requested.connect(self._seek_relative)
-        content_splitter.addWidget(self.room_view)
-
-        content_splitter.setSizes([340, 760])
-        main_layout.addWidget(content_splitter, stretch=1)
-
-        # 3. Timeline de Automação Dinâmica por Trechos
-        self.timeline_widget = TimelineWidget(self.timeline_manager)
-        self.timeline_widget.section_selected.connect(self._on_timeline_section_selected)
-        self.timeline_widget.split_requested.connect(self._on_timeline_split_requested)
-        self.timeline_widget.section_renamed.connect(self._on_timeline_renamed)
-        self.timeline_widget.section_removed.connect(self._on_timeline_removed)
-        self.timeline_widget.seek_requested.connect(self._on_timeline_seek_requested)
-        self.timeline_widget.reanalyze_requested.connect(self._on_ia_maestro_clicked)
-        main_layout.addWidget(self.timeline_widget)
-
-        # 4. Rodapé / Player
-        footer = self._create_player_bar()
-        main_layout.addWidget(footer)
-
-    def _create_header(self) -> QWidget:
-        header = QWidget()
-        header.setObjectName("HeaderBar")
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(10)
-
-        title_box = QVBoxLayout()
-        lbl_title = QLabel("ATMOSSPLIT")
-        lbl_title.setStyleSheet("font-size: 16px; font-weight: 800; color: #00E5FF; letter-spacing: 1.5px;")
-        lbl_sub = QLabel("Montador Espacial 7.1.4 (JBL Bar 1000MK2)")
-        lbl_sub.setStyleSheet("font-size: 10px; color: #718096;")
-        title_box.addWidget(lbl_title)
-        title_box.addWidget(lbl_sub)
-        layout.addLayout(title_box)
-
-        layout.addSpacing(10)
-
-        # Seletor de Saída de Áudio
-        lbl_out = QLabel("Saída:")
-        lbl_out.setStyleSheet("font-size: 11px; color: #A0AEC0;")
-        layout.addWidget(lbl_out)
-
-        self.combo_audio_dev = QComboBox()
-        self.combo_audio_dev.setMinimumWidth(180)
-        self._populate_audio_devices()
-        self.combo_audio_dev.currentIndexChanged.connect(self._on_audio_device_changed)
-        layout.addWidget(self.combo_audio_dev)
-
-        layout.addSpacing(10)
-
-        # Badges de Hardware
-        lbl_hw = QLabel("Xeon (Núcleos 2-15) • Núcleos 0-1 Livres (KDE)")
-        lbl_hw.setStyleSheet("background-color: #1F2430; padding: 4px 8px; border-radius: 4px; color: #A0AEC0; font-size: 10px;")
-        layout.addWidget(lbl_hw)
-
-        layout.addStretch(1)
-
-        # Botão de Gerenciamento de Cache
-        self.btn_cache = QPushButton("🧹 Cache (0 MB)")
-        self.btn_cache.setObjectName("BtnCache")
-        self.btn_cache.clicked.connect(self._open_cache_manager_dialog)
-        layout.addWidget(self.btn_cache)
-
-        # Botão de Ajuda e Atalhos Rápidos
-        self.btn_help = QPushButton("❓ Ajuda / Atalhos")
-        self.btn_help.setObjectName("BtnCache")
-        self.btn_help.clicked.connect(self._open_help_dialog)
-        layout.addWidget(self.btn_help)
-
-        lbl_mode = QLabel("Modo IA:")
-        lbl_mode.setStyleSheet("font-size: 11px; color: #A0AEC0;")
-        layout.addWidget(lbl_mode)
-
+        self.options = QToolButton()
+        self.options.setText("Sessão")
+        self.options.setPopupMode(QToolButton.InstantPopup)
+        option_menu = QMenu(self.options)
+        self.search_action = option_menu.addAction("Buscar música online…", self._on_search_clicked)
+        self.cache_action = option_menu.addAction("Gerenciar cache…", self._cache_dialog)
+        option_menu.addSeparator()
+        self.theme_action = option_menu.addAction("Alternar tema (Claro / AMOLED)", self._toggle_theme)
+        self.reanalyze_action = option_menu.addAction("Analisar a estrutura novamente", self._reanalyze)
+        self.reduced_motion = option_menu.addAction("Reduzir movimento")
+        self.reduced_motion.setCheckable(True)
+        self.reduced_motion.setChecked(self.settings.value("ui/reducedMotion", False, type=bool))
+        self.reduced_motion.toggled.connect(self._set_reduced_motion)
+        option_menu.addAction("Atalhos de teclado", self._help)
+        self.options.setMenu(option_menu)
+        bar.addWidget(self.options)
         self.combo_mode = QComboBox()
-        self.combo_mode.addItem("Cirúrgico (8–12 Camadas)", "surgical")
-        self.combo_mode.addItem("Rápido (~4 Camadas)", "fast")
-        layout.addWidget(self.combo_mode)
+        self.combo_mode.addItem("Separação detalhada", "surgical")
+        self.combo_mode.addItem("Separação rápida", "fast")
+        self.combo_mode.setCurrentIndex(max(0, self.combo_mode.findData(self.settings.value("separation/mode", "surgical"))))
+        self.combo_mode.currentIndexChanged.connect(
+            lambda: self.settings.setValue("separation/mode", self.combo_mode.currentData()))
+        self.combo_mode.setAccessibleName("Modo de separação para a próxima faixa")
+        bar.addWidget(self.combo_mode)
+        self.btn_open = QPushButton("Abrir faixa")
+        self.btn_open.setObjectName("Primary")
+        self.btn_open.setShortcut(QKeySequence.Open)
+        self.btn_open.clicked.connect(self._open)
+        bar.addWidget(self.btn_open)
+        top.addLayout(bar)
+        layout.addWidget(header)
 
-        btn_search = QPushButton("🔍 Buscar Música")
-        btn_search.clicked.connect(self._on_search_clicked)
-        layout.addWidget(btn_search)
+        self.workspace = QSplitter(Qt.Horizontal)
+        self.workspace.setChildrenCollapsible(False)
+        self.workspace.setHandleWidth(3)
+        sources, left = _panel("SourcePanel")
+        left.addWidget(_label("Fontes", "Heading"))
+        self.source_list = QListWidget()
+        self.source_list.setAccessibleName("Fontes da seção")
+        self.source_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.source_list.currentItemChanged.connect(self._select_list_source)
+        self.empty_sources = _label("Arraste um arquivo de áudio para a janela ou use Abrir faixa.", "Subtle")
+        self.empty_sources.setWordWrap(True)
+        self.empty_sources.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        left.addWidget(self.empty_sources, 1)
+        left.addWidget(self.source_list, 1)
+        self.source_count = _label("", "Subtle")
+        left.addWidget(self.source_count)
+        sources.setMinimumWidth(160)
+        self.workspace.addWidget(sources)
+        center, scene_layout = _panel("Studio", 12)
+        scene_top = QHBoxLayout()
+        scene_top.addWidget(_label("Sala 7.1.4", "Heading"))
+        self.event_caption = _label("", "SectionInfo")
+        self.event_caption.setAccessibleName("Microeventos ativos na sala")
+        self.event_caption.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        scene_top.addWidget(self.event_caption, 1)
+        scene_top.addWidget(_label("Tracejado: teto   ·   Losango: projeção", "Subtle"))
+        scene_layout.addLayout(scene_top)
+        self.room_view = RoomView714()
+        self.room_view.reduced_motion = self.reduced_motion.isChecked()
+        self.room_view.stem_selected.connect(self._choose_source)
+        self.room_view.placement_changed.connect(self._room_changed)
+        self.room_view.stereo_toggled.connect(self._stereo_changed)
+        self.room_view.copy_requested.connect(self._copy)
+        self.room_view.paste_requested.connect(self._paste)
+        self.room_view.duplicate_requested.connect(self._duplicate)
+        self.room_view.delete_requested.connect(self._delete)
+        self.room_view.seek_requested.connect(self._seek_relative)
+        self.room_view.playback_toggle_requested.connect(self._toggle_preview)
+        scene_layout.addWidget(self.room_view, 1)
+        self.workspace.addWidget(center)
 
-        btn_open = QPushButton("📁 Abrir Arquivo")
-        btn_open.setObjectName("BtnPrimary")
-        btn_open.clicked.connect(self._on_open_file_clicked)
-        layout.addWidget(btn_open)
-
-        return header
-
-    def _populate_audio_devices(self):
-        """Preenche o seletor com as placas de áudio físicas e virtuais PipeWire/ALSA."""
-        self.combo_audio_dev.clear()
-        self.combo_audio_dev.addItem("Padrão do Sistema (PipeWire)", None)
-
-        devices = LiveSpatialPlayer.get_available_devices()
-        seen = set()
-        for d in devices:
-            raw_name = d["name"]
-            clean_name = raw_name.split(",")[0].strip()
-            if "hw:" in raw_name or "sysdefault" in raw_name or "dmix" in raw_name:
-                continue
-            if clean_name in seen:
-                clean_name = f"{clean_name} ({d['index']})"
-            seen.add(clean_name)
-            self.combo_audio_dev.addItem(f"{clean_name}", d["index"])
-
-    def _on_audio_device_changed(self):
-        dev_idx = self.combo_audio_dev.currentData()
-        self.live_player.set_output_device(dev_idx)
-
-    def _refresh_cache_button_label(self):
-        try:
-            total_bytes = self.cache_manager.get_total_cache_size_bytes()
-            total_mb = round(total_bytes / (1024 * 1024), 1)
-            self.btn_cache.setText(f"🧹 Cache ({total_mb} MB)")
-        except Exception:
-            pass
-
-    def _open_cache_manager_dialog(self):
-        """Abre modal interativo para inspecionar e limpar o cache de stems."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Gerenciador de Cache de Stems")
-        dlg.resize(550, 360)
-        dlg_layout = QVBoxLayout(dlg)
-
-        tracks = self.cache_manager.list_cached_tracks()
-        total_bytes = self.cache_manager.get_total_cache_size_bytes()
-        total_mb = round(total_bytes / (1024 * 1024), 1)
-
-        lbl_info = QLabel(f"Armazenamento total em uso: <b>{total_mb} MB</b> ({len(tracks)} faixas cacheadas)")
-        lbl_info.setStyleSheet("font-size: 12px; margin-bottom: 6px;")
-        dlg_layout.addWidget(lbl_info)
-
-        table = QTableWidget(len(tracks), 3)
-        table.setHorizontalHeaderLabels(["Hash / Modo", "Stems", "Tamanho (MB)"])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-
-        for row, t in enumerate(tracks):
-            table.setItem(row, 0, QTableWidgetItem(f"{t['file_hash'][:12]}... [{t['mode']}]"))
-            table.setItem(row, 1, QTableWidgetItem(str(t['stems_count'])))
-            table.setItem(row, 2, QTableWidgetItem(f"{t['size_mb']} MB"))
-
-        dlg_layout.addWidget(table)
-
-        btn_box = QHBoxLayout()
-        btn_clear = QPushButton("🗑 Limpar Todo o Cache")
-        btn_clear.setObjectName("BtnCancel")
-
-        def _do_clear():
-            confirm = QMessageBox.question(
-                dlg,
-                "Limpar Cache",
-                "Deseja realmente apagar todos os stems cacheados no disco?\n"
-                "Músicas já abertas precisarão ser reprocessadas.",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if confirm == QMessageBox.Yes:
-                freed = self.cache_manager.clear_cache()
-                freed_mb = round(freed / (1024 * 1024), 1)
-                self._refresh_cache_button_label()
-                QMessageBox.information(dlg, "Cache Limpo", f"{freed_mb} MB liberados com sucesso!")
-                dlg.accept()
-
-        btn_clear.clicked.connect(_do_clear)
-        btn_close = QPushButton("Fechar")
-        btn_close.clicked.connect(dlg.reject)
-
-        btn_box.addWidget(btn_clear)
-        btn_box.addStretch(1)
-        btn_box.addWidget(btn_close)
-        dlg_layout.addLayout(btn_box)
-
-        dlg.exec()
-
-    def _open_help_dialog(self):
-        """Abre modal com manual de atalhos e dicas de uso do AtmosSplit."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("AtmosSplit — Guia de Atalhos & Recursos")
-        dlg.resize(640, 520)
-        dlg_layout = QVBoxLayout(dlg)
-        dlg_layout.setContentsMargins(16, 16, 16, 16)
-        dlg_layout.setSpacing(12)
-
-        lbl_header = QLabel("Guia de Atalhos & Operação Espacial 7.1.4")
-        lbl_header.setStyleSheet("font-size: 15px; font-weight: bold; color: #00E5FF;")
-        dlg_layout.addWidget(lbl_header)
-
-        info_text = QLabel(
-            "<b>Controles do Mouse & Sala 3D:</b><br>"
-            "• <b>Clique em uma Bolinha:</b> Seleciona o instrumento para foco.<br>"
-            "• <b>Arrastar Bolinha:</b> Move a posição no plano da sala.<br>"
-            "• <b>Scroll do Mouse (Roda):</b> Eleva ou desce a altura Z. O raio visual cresce com a altura.<br>"
-            "• <b>Duplo Clique na Bolinha:</b> Alterna entre som mono e <b>Espelhamento Estéreo Simétrico (L / R)</b>.<br><br>"
-            "<b>Atalhos de Teclado Rápidos:</b><br>"
-            "• <code>Espaço</code>: Tocar / Pausar pré-escuta binaural.<br>"
-            "• <code>D</code>: Alternar Espelhamento Estéreo (L / R) no instrumento selecionado.<br>"
-            "• <code>0</code>: Centralizar o instrumento selecionado no meio do palco.<br>"
-            "• <code>M</code> / <code>S</code>: Mudar Mudo (Mute) ou Solo do instrumento ativo.<br>"
-            "• <code>Setas Cima / Baixo</code>: Elevar ou descer a altura Z em passos de 5%.<br>"
-            "• <code>Setas Esquerda / Direita</code>: Retroceder / Avançar 5 segundos na faixa.<br>"
-            "• <code>1 a 5</code>: Alternar instantaneamente entre Presets Atmos (Equilibrado, 360°, Show, Voz, Clube).<br><br>"
-            "<b>Automação por Trechos & Wi-Fi:</b><br>"
-            "• <b>✂️ Dividir no Tempo Atual:</b> Cria um novo trecho musical com mixagem espacial independente.<br>"
-            "• <b>⚡ Rápido (MP4 Wi-Fi / TV):</b> Salva a música inteira em Dolby Digital Plus + Dolby Atmos 7.1.4 (E-AC-3 JOC) "
-            "em <code>~/Music/DolbyAtmos</code> para streaming instantâneo via Rygel / DLNA / TV Samsung."
-        )
-        info_text.setWordWrap(True)
-        info_text.setStyleSheet("font-size: 11px; line-height: 1.4; color: #E2E8F0; background-color: #16181F; padding: 12px; border-radius: 6px; border: 1px solid #232734;")
-        dlg_layout.addWidget(info_text)
-
-        btn_box = QHBoxLayout()
-        btn_box.addStretch(1)
-        btn_close = QPushButton("Entendido")
-        btn_close.setObjectName("BtnPrimary")
-        btn_close.clicked.connect(dlg.accept)
-        btn_box.addWidget(btn_close)
-        dlg_layout.addLayout(btn_box)
-
-        dlg.exec()
-
-    def _create_stems_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        top_row = QHBoxLayout()
-        lbl_stems = QLabel("CAMADAS ISOLADAS")
-        lbl_stems.setStyleSheet("font-size: 11px; font-weight: bold; color: #A0AEC0; letter-spacing: 1px;")
-        top_row.addWidget(lbl_stems)
-
-        top_row.addStretch(1)
-        lbl_pre = QLabel("Preset (1-5):")
-        lbl_pre.setStyleSheet("font-size: 10px; color: #718096;")
-        top_row.addWidget(lbl_pre)
-
+        inspector, right = _panel("Inspector")
+        self.inspector_heading = _label("Inspetor de fonte", "Heading")
+        right.addWidget(self.inspector_heading)
+        self.inspector_hint = _label("Selecione uma fonte na lista ou na sala.", "Subtle")
+        self.inspector_hint.setWordWrap(True)
+        right.addWidget(self.inspector_hint)
+        self.inspector_slot = QVBoxLayout()
+        right.addLayout(self.inspector_slot)
+        right.addStretch()
+        rule = QFrame()
+        rule.setObjectName("Line")
+        rule.setFixedHeight(1)
+        right.addWidget(rule)
+        right.addWidget(_label("Direção espacial", "Heading"))
         self.combo_presets = QComboBox()
-        self.combo_presets.addItem("1: Equilibrado", DirectorPreset.BALANCED.value)
-        self.combo_presets.addItem("2: Imersão 360°", DirectorPreset.IMMERSION_360.value)
-        self.combo_presets.addItem("3: Show ao Vivo", DirectorPreset.LIVE_STAGE.value)
-        self.combo_presets.addItem("4: Foco Vocal", DirectorPreset.VOCAL_FOCUS.value)
-        self.combo_presets.addItem("5: Clube / Bass", DirectorPreset.CLUB_BASS.value)
-        self.combo_presets.currentIndexChanged.connect(self._on_preset_selected)
-        top_row.addWidget(self.combo_presets)
-
-        layout.addLayout(top_row)
-
-        # Barra Visual de Seleção e Criação de Trechos / Seções da Música
-        self.section_control_bar = QFrame()
-        self.section_control_bar.setStyleSheet("""
-            QFrame {
-                background-color: #171A23;
-                border: 1px solid #282E3E;
-                border-radius: 6px;
-                padding: 4px 6px;
-            }
-        """)
-        sec_layout = QHBoxLayout(self.section_control_bar)
-        sec_layout.setContentsMargins(4, 2, 4, 2)
-        sec_layout.setSpacing(6)
-
-        lbl_sec = QLabel("📍 Trecho:")
-        lbl_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E5FF;")
-        sec_layout.addWidget(lbl_sec)
-
-        self.combo_sections = QComboBox()
-        self.combo_sections.setStyleSheet("font-size: 11px; font-weight: bold; color: #FFFFFF;")
-        self.combo_sections.currentIndexChanged.connect(self._on_combo_section_changed)
-        sec_layout.addWidget(self.combo_sections, stretch=1)
-
-        self.btn_split_here = QPushButton("✂️ Dividir Aqui")
-        self.btn_split_here.setToolTip("Divide a música no ponto atual da agulha para criar uma nova mixagem espacial independente")
-        self.btn_split_here.setStyleSheet("font-size: 10px; font-weight: bold; padding: 4px 8px; background-color: #242A38; border: 1px solid #374158; color: #E2E8F0; border-radius: 4px;")
-        self.btn_split_here.clicked.connect(self._on_split_here_button_clicked)
-        sec_layout.addWidget(self.btn_split_here)
-
-        layout.addWidget(self.section_control_bar)
-
-        self.scroll_stems = QScrollArea()
-        self.scroll_stems.setWidgetResizable(True)
-        self.stems_container = QWidget()
-        self.stems_layout = QVBoxLayout(self.stems_container)
-        self.stems_layout.setContentsMargins(0, 0, 0, 0)
-        self.stems_layout.setSpacing(6)
-        self.stems_layout.addStretch(1)
-
-        self.lbl_empty_stems = QLabel("Arraste uma música aqui ou clique em\n'Abrir Arquivo' para começar.")
-        self.lbl_empty_stems.setAlignment(Qt.AlignCenter)
-        self.lbl_empty_stems.setStyleSheet("color: #4A5568; font-size: 12px; margin-top: 40px;")
-        self.stems_layout.addWidget(self.lbl_empty_stems)
-
-        self.scroll_stems.setWidget(self.stems_container)
-        layout.addWidget(self.scroll_stems, stretch=1)
-
-        return panel
-
-    def _create_player_bar(self) -> QWidget:
-        footer = QWidget()
-        footer.setObjectName("PlayerBar")
-        layout = QHBoxLayout(footer)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(12)
-
-        self.lbl_cover = QLabel()
-        self.lbl_cover.setFixedSize(40, 40)
-        self.lbl_cover.setStyleSheet("background-color: #1A1D24; border-radius: 4px;")
-        self.lbl_cover.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_cover)
-
-        info_box = QVBoxLayout()
-        info_box.setSpacing(2)
-        self.lbl_track_title = QLabel("Nenhuma música carregada")
-        self.lbl_track_title.setStyleSheet("font-weight: bold; font-size: 12px; color: #FFFFFF;")
-        self.lbl_track_artist = QLabel("Aguardando arquivo ou busca")
-        self.lbl_track_artist.setStyleSheet("font-size: 10px; color: #718096;")
-        info_box.addWidget(self.lbl_track_title)
-        info_box.addWidget(self.lbl_track_artist)
-        layout.addLayout(info_box)
-
-        layout.addSpacing(8)
-
-        self.btn_play = QPushButton("▶ Play (Espaço)")
-        self.btn_play.setFixedWidth(135)
-        self.btn_play.clicked.connect(self._toggle_preview_playback)
-        layout.addWidget(self.btn_play)
-
-        self.slider_time = QSlider(Qt.Horizontal)
-        self.slider_time.setRange(0, 1000)
-        self.slider_time.setValue(0)
-        self.slider_time.sliderMoved.connect(self._on_seek_moved)
-        self.slider_time.sliderReleased.connect(lambda: self._on_seek_moved(self.slider_time.value()))
-        # Permite clique direto em qualquer ponto da régua para saltar instantaneamente
-        def _slider_mouse_press(ev):
-            if ev.button() == Qt.LeftButton:
-                val = QStyle.sliderValueFromPosition(
-                    self.slider_time.minimum(), self.slider_time.maximum(),
-                    int(ev.position().x()), self.slider_time.width()
-                )
-                self.slider_time.setValue(val)
-                self._on_seek_moved(val)
-            QSlider.mousePressEvent(self.slider_time, ev)
-        self.slider_time.mousePressEvent = _slider_mouse_press
-        layout.addWidget(self.slider_time, stretch=1)
-
-        self.lbl_time = QLabel("00:00 / 00:00")
-        self.lbl_time.setStyleSheet("font-size: 11px; color: #A0AEC0; font-family: monospace;")
-        layout.addWidget(self.lbl_time)
-
-        layout.addSpacing(8)
-
-        # Fader de Volume Master Geral
-        lbl_vol_icon = QLabel("🔊")
-        lbl_vol_icon.setStyleSheet("font-size: 11px;")
-        layout.addWidget(lbl_vol_icon)
-
-        self.slider_master_vol = QSlider(Qt.Horizontal)
-        self.slider_master_vol.setRange(0, 150)
-        self.slider_master_vol.setValue(100)
-        self.slider_master_vol.setFixedWidth(80)
-        self.slider_master_vol.setToolTip("Volume Master Geral (0 a 150%)")
-        self.slider_master_vol.valueChanged.connect(self._on_master_volume_changed)
-        layout.addWidget(self.slider_master_vol)
-
-        self.lbl_vol_text = QLabel("100%")
-        self.lbl_vol_text.setStyleSheet("font-size: 10px; color: #A0AEC0; width: 32px;")
-        layout.addWidget(self.lbl_vol_text)
-
-        layout.addSpacing(10)
-
-        btn_quick = QPushButton("⚡ Rápido (MP4 Wi-Fi / TV)")
-        btn_quick.setObjectName("BtnQuickExport")
-        btn_quick.setToolTip("Exporta a faixa inteira em MP4 Dolby Digital Plus + Dolby Atmos 7.1.4 (E-AC-3 JOC) diretamente para ~/Music/DolbyAtmos com toda a automação de trechos.")
-        btn_quick.clicked.connect(self._on_quick_export_clicked)
-        layout.addWidget(btn_quick)
-
-        btn_export = QPushButton("💾 Exportar...")
-        btn_export.clicked.connect(self._on_export_clicked)
-        layout.addWidget(btn_export)
-
-        btn_jbl = QPushButton("🔊 Tocar na JBL 1000")
-        btn_jbl.setObjectName("BtnJBL")
-        btn_jbl.setToolTip("Transmite a faixa via Wi-Fi/DLNA para a TV Samsung com áudio Dolby Atmos 7.1.4 na JBL Bar 1000 e tela apagada.")
-        btn_jbl.clicked.connect(self._on_play_on_jbl_clicked)
-        layout.addWidget(btn_jbl)
-
-        return footer
-
-    def _on_master_volume_changed(self, val: int):
-        vol = float(val) / 100.0
-        self.live_player.set_volume(vol)
-        self.lbl_vol_text.setText(f"{val}%")
-
-    def _poll_audio_state(self):
-        """Atualização a ~33 FPS lendo snapshots atômicos sem tocar na thread de áudio."""
-        _immunize_cpython_none_refcount()
-        cur_s, tot_s, vu_stems, sub_vu, is_playing = self.live_player.get_ui_snapshot()
-
-        if is_playing or cur_s > 0:
-            if tot_s > 0:
-                ratio = cur_s / tot_s
-                if not self.slider_time.isSliderDown():
-                    self.slider_time.blockSignals(True)
-                    self.slider_time.setValue(int(ratio * 1000))
-                    self.slider_time.blockSignals(False)
-
-            c_m, c_sec = int(cur_s // 60), int(cur_s % 60)
-            t_m, t_sec = int(tot_s // 60), int(tot_s % 60)
-            self.lbl_time.setText(f"{c_m:02d}:{c_sec:02d} / {t_m:02d}:{t_sec:02d}")
-
-            # Atualizar agulha da timeline de trechos
-            self.timeline_widget.set_current_playback_time(cur_s)
-
-            # Atualizar posicionamento 3D em tempo real na sala e nos cards
-            if is_playing:
-                self._update_dynamic_playback_ui(cur_s)
-                self.room_view.set_vu_levels(vu_stems, sub_vu)
-            else:
-                self.room_view.set_vu_levels({}, 0.0)
-
-    def _update_dynamic_playback_ui(self, cur_s: float):
-        """Atualiza a sala 3D, agulha, cards e trecho ativo em tempo real com as coordenadas da música."""
-        if not self.timeline_manager or not self.current_stems:
-            return
-
-        has_dynamic_timeline = len(self.timeline_manager.sections) > 1
-        if not has_dynamic_timeline:
-            return
-
-        # 1. Posições 3D contínuas e interpoladas para o instante exato
-        interp_plcs = self.timeline_manager.get_interpolated_placements(cur_s)
-
-        # 2. Atualiza a sala 3D em tempo real (bolinhas se movem pelo espaço)
-        if not self.room_view._is_dragging:
-            self.room_view.set_playback_placements(interp_plcs)
-
-        # 3. Atualiza os cards à esquerda (sliders e textos)
-        if set(self.stem_cards.keys()) != set(interp_plcs.keys()):
-            self.current_placements = interp_plcs
-            self._populate_stems_ui()
-        else:
-            for name, card in self.stem_cards.items():
-                plc = interp_plcs.get(name)
-                if plc:
-                    card.sync_dynamic_state(plc)
-
-        # 4. Sincroniza o trecho ativo na timeline e na caixa suspensa
-        sec = self.timeline_manager.get_section_at_time(cur_s)
-        if sec and sec.id != self.timeline_manager.active_edit_section_id and not self.room_view._is_dragging:
-            self.timeline_manager.active_edit_section_id = sec.id
-            self.timeline_widget.refresh_timeline()
-
-            self.combo_sections.blockSignals(True)
-            for i in range(self.combo_sections.count()):
-                if self.combo_sections.itemData(i) == sec.id:
-                    self.combo_sections.setCurrentIndex(i)
-                    break
-            self.combo_sections.blockSignals(False)
-
-    def _copy_placement(self, stem_name: str):
-        if stem_name in self.current_placements:
-            self._placement_clipboard = copy.copy(self.current_placements[stem_name])
-            self.statusBar().showMessage(f"📋 Copiado: '{stem_name}'. Pressione Ctrl+V ou use o menu para duplicar.", 3000)
-
-    def _paste_placement(self):
-        if self._placement_clipboard:
-            source = self._placement_clipboard.source_stem_name or self._placement_clipboard.stem_name
-            self._duplicate_placement(source)
-        elif self.room_view.active_stem_name:
-            self._duplicate_placement(self.room_view.active_stem_name)
-
-    def _seek_relative(self, delta_s: float):
-        cur_s = self.live_player.current_time_s
-        self.live_player.seek(max(0.0, (cur_s + delta_s) * self.live_player.sample_rate))
-
-    def keyPressEvent(self, event: QKeyEvent):
-        key = event.key()
-        active_name = self.room_view.active_stem_name
-
-        if key == Qt.Key_Space:
-            self._toggle_preview_playback()
-            event.accept()
-        elif key == Qt.Key_D:
-            # Alternar espelhamento estéreo (L / R)
-            if active_name:
-                self.room_view.toggle_stereo_mirror(active_name)
-                event.accept()
-        elif key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
-            if active_name:
-                self._copy_placement(active_name)
-                event.accept()
-        elif key == Qt.Key_V and event.modifiers() & Qt.ControlModifier:
-            self._paste_placement()
-            event.accept()
-        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
-            if active_name:
-                self._delete_placement(active_name)
-                event.accept()
-        elif key == Qt.Key_M:
-            if active_name and active_name in self.stem_cards:
-                self.stem_cards[active_name].btn_mute.click()
-                event.accept()
-        elif key == Qt.Key_S:
-            if active_name and active_name in self.stem_cards:
-                self.stem_cards[active_name].btn_solo.click()
-                event.accept()
-        elif key == Qt.Key_0:
-            if active_name and active_name in self.current_placements:
-                plc = self.current_placements[active_name]
-                plc.x, plc.y, plc.z = 0.0, 0.0, 0.0
-                self._on_room_placement_changed(active_name, 0.0, 0.0, 0.0)
-                self.room_view.update()
-                event.accept()
-        elif key == Qt.Key_Up:
-            if active_name and active_name in self.current_placements:
-                plc = self.current_placements[active_name]
-                plc.z = min(1.0, plc.z + 0.05)
-                self._on_room_placement_changed(active_name, plc.x, plc.y, plc.z)
-                self.room_view.update()
-                event.accept()
-        elif key == Qt.Key_Down:
-            if active_name and active_name in self.current_placements:
-                plc = self.current_placements[active_name]
-                plc.z = max(0.0, plc.z - 0.05)
-                self._on_room_placement_changed(active_name, plc.x, plc.y, plc.z)
-                self.room_view.update()
-                event.accept()
-        elif key == Qt.Key_1:
-            self.combo_presets.setCurrentIndex(0)
-            event.accept()
-        elif key == Qt.Key_2:
-            self.combo_presets.setCurrentIndex(1)
-            event.accept()
-        elif key == Qt.Key_3:
-            self.combo_presets.setCurrentIndex(2)
-            event.accept()
-        elif key == Qt.Key_4:
-            self.combo_presets.setCurrentIndex(3)
-            event.accept()
-        elif key == Qt.Key_5:
-            self.combo_presets.setCurrentIndex(4)
-            event.accept()
-        elif key == Qt.Key_Left:
-            self._seek_relative(-5.0)
-            event.accept()
-        elif key == Qt.Key_Right:
-            self._seek_relative(5.0)
-            event.accept()
-            cur_s = self.live_player.current_time_s
-            self.live_player.seek(max(0.0, (cur_s + 5.0) * self.live_player.sample_rate))
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent):
-        for url in event.mimeData().urls():
-            file_path = url.toLocalFile()
-            if os.path.isfile(file_path):
-                self._load_and_process_audio_path(file_path)
-                break
-
-    def _on_open_file_clicked(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Selecione uma faixa de áudio",
-            str(Path.home() / "Music"),
-            "Arquivos de Áudio (*.flac *.wav *.alac *.mp3 *.m4a *.opus *.ogg);;Todos os arquivos (*.*)"
-        )
-        if file_path:
-            self._load_and_process_audio_path(file_path)
-
-    def _on_search_clicked(self):
-        query, ok = QInputDialog.getText(
-            self,
-            "Buscar Música de Alta Qualidade",
-            "Digite o Artista e Nome da Música:"
-        )
-        if ok and query.strip():
-            self._perform_online_search(query.strip())
-
-    def _perform_online_search(self, query: str):
-        self.progress_container.setVisible(True)
-        self.progress_bar.setValue(20)
-        self.statusBar().showMessage(f"Buscando '{query}' em fontes lossless e Hi-Res...")
-
-        results = self.search_engine.search(query)
-        self.progress_container.setVisible(False)
-
-        if not results:
-            QMessageBox.information(self, "Busca", f"Nenhum resultado encontrado para '{query}'.")
-            return
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Resultados da Busca")
-        dlg.resize(540, 300)
-        dlg_layout = QVBoxLayout(dlg)
-
-        lbl = QLabel(f"Resultados encontrados para '{query}':")
-        dlg_layout.addWidget(lbl)
-
-        combo = QComboBox()
-        for r in results:
-            combo.addItem(f"{r.artist} - {r.title} [{r.format_label}]", r)
-        dlg_layout.addWidget(combo)
-
-        btn_box = QHBoxLayout()
-        btn_ok = QPushButton("Baixar e Destrinchar")
-        btn_ok.setObjectName("BtnPrimary")
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel = QPushButton("Cancelar")
-        btn_cancel.clicked.connect(dlg.reject)
-        btn_box.addWidget(btn_cancel)
-        btn_box.addWidget(btn_ok)
-        dlg_layout.addLayout(btn_box)
-
-        if dlg.exec() == QDialog.Accepted:
-            selected_item: SearchResultItem = combo.currentData()
-            self._download_and_process_result(selected_item)
-
-    def _download_and_process_result(self, item: SearchResultItem):
-        self.progress_container.setVisible(True)
-        self.progress_bar.setValue(40)
-        self.statusBar().showMessage(f"Baixando '{item.artist} - {item.title}'...")
-
-        try:
-            downloaded_path = self.search_engine.download_to_file(item)
-            self._load_and_process_audio_path(downloaded_path)
-        except Exception as e:
-            self.progress_container.setVisible(False)
-            QMessageBox.critical(self, "Erro no Download", f"Não foi possível baixar a faixa: {e}")
-
-    def _load_and_process_audio_path(self, file_path: str):
-        try:
-            self.live_player.stop()
-            self.btn_play.setText("▶ Play (Espaço)")
-
-            source = load_audio_file(file_path, load_data_now=False)
-            self.current_source = source
-
-            self.lbl_track_title.setText(source.metadata.title)
-            self.lbl_track_artist.setText(f"{source.metadata.artist} • {source.metadata.format_name} {source.metadata.sample_rate}Hz")
-
-            if source.metadata.cover_image_bytes:
-                pix = QPixmap()
-                pix.loadFromData(source.metadata.cover_image_bytes)
-                if not pix.isNull():
-                    self.lbl_cover.setPixmap(pix.scaled(40, 40, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
-            else:
-                self.lbl_cover.setText("🎵")
-
-            mode = self.combo_mode.currentData() or "surgical"
-
-            # 1. Checar se já existe no cache (recarga instantânea sem rodar subprocesso)
-            if self.cache_manager.has_cached_stems(source.sha256_hash, mode):
-                self.statusBar().showMessage("Carregando stems do cache ultra-rápido...")
-                res = self.stem_engine.separate_track(
-                    audio_array=np.zeros((10, 2)),
-                    sample_rate=source.sample_rate,
-                    file_hash=source.sha256_hash,
-                    mode=mode
-                )
-                self._on_stems_ready(res)
-                return
-
-            # 2. Se não estiver em cache, dispara em subprocesso desacoplado via QProcess
-            self._start_decoupled_separation(file_path, source.sha256_hash, mode)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Erro ao carregar", f"Falha ao ler arquivo: {e}")
-
-    def _start_decoupled_separation(self, file_path: str, file_hash: str, mode: str):
-        """Dispara o processo de IA isolado da GUI para garantir zero congelamento."""
-        if self.separation_process is not None:
-            self._cancel_separation_task()
-
-        self._last_worker_error = None
-        self._user_cancelled_separation = False
-
-        self.progress_container.setVisible(True)
-        self.progress_bar.setValue(5)
-        self.statusBar().showMessage(f"Iniciando separação por IA ({mode})...")
-
-        self._current_task_info = {
-            "file_path": file_path,
-            "file_hash": file_hash,
-            "mode": mode,
-            "start_time": str(time.time())
-        }
-
-        proc = QProcess(self)
-        proc.setProgram(sys.executable)
-        proc.setArguments([
-            "-m", "src.separation.worker_cli",
-            "--input", file_path,
-            "--hash", file_hash,
-            "--mode", mode
-        ])
-
-        proc.readyReadStandardOutput.connect(self._on_worker_stdout)
-        proc.finished.connect(self._on_worker_finished)
-        self.separation_process = proc
-        proc.start()
-
-    def _cancel_separation_task(self):
-        """Encerra instantaneamente o processo de IA e todas as threads filhas no Xeon."""
-        self._user_cancelled_separation = True
-        if self.separation_process and self.separation_process.state() != QProcess.NotRunning:
-            pid = self.separation_process.processId()
-            try:
-                parent = psutil.Process(pid)
-                for child in parent.children(recursive=True):
-                    try:
-                        child.kill()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                parent.kill()
-            except Exception:
-                self.separation_process.kill()
-
-            self.separation_process = None
-            self.progress_container.setVisible(False)
-            self.statusBar().showMessage("Separação cancelada pelo usuário.")
-
-    def _on_worker_stdout(self):
-        if not self.separation_process:
-            return
-
-        raw_data = self.separation_process.readAllStandardOutput().data().decode("utf-8", errors="ignore")
-        for line in raw_data.splitlines():
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                msg = json.loads(line)
-                m_type = msg.get("type")
-                if m_type == "progress":
-                    val = int(msg.get("value", 0.0) * 100)
-                    text = msg.get("message", "")
-                    self.progress_bar.setValue(val)
-                    self.statusBar().showMessage(text)
-                elif m_type == "error":
-                    err_msg = msg.get("message", "Erro desconhecido")
-                    self._last_worker_error = err_msg
-                    self.statusBar().showMessage(f"Erro na IA: {err_msg}")
-            except Exception:
-                pass
-
-    def _on_worker_finished(self, exit_code: int, exit_status):
-        self.progress_container.setVisible(False)
-        stderr_output = ""
-        if self.separation_process:
-            try:
-                stderr_output = self.separation_process.readAllStandardError().data().decode("utf-8", errors="ignore").strip()
-            except Exception:
-                pass
-        self.separation_process = None
-
-        if exit_code != 0:
-            if self._user_cancelled_separation:
-                self.statusBar().showMessage("Separação cancelada pelo usuário.")
-            else:
-                err = self._last_worker_error or stderr_output or "Processo de IA encerrou com erro."
-                self.statusBar().showMessage(f"Falha na IA: {err}")
-                QMessageBox.critical(self, "Falha na Separação por IA", f"A separação dos instrumentos encontrou um erro:\n\n{err}")
-            return
-
-        if not self._current_task_info:
-            return
-
-        file_hash = self._current_task_info["file_hash"]
-        mode = self._current_task_info["mode"]
-
-        self._refresh_cache_button_label()
-
-        cached_stems = self.cache_manager.load_stems(file_hash, mode)
-        if not cached_stems:
-            QMessageBox.critical(self, "Erro", "Stems não foram encontrados após processamento.")
-            return
-
-        res = self.stem_engine.separate_track(
-            audio_array=np.zeros((10, 2)),
-            sample_rate=self.current_source.sample_rate if self.current_source else 48000,
-            file_hash=file_hash,
-            mode=mode
-        )
-        self._on_stems_ready(res)
-
-    def _on_stems_ready(self, result: SeparationResult):
-        self.statusBar().showMessage(f"Stems prontos em {result.elapsed_time_s:.1f}s (Cache: {'Sim' if result.from_cache else 'Não'})")
-        self.current_stems = result.stems
-
-        profiles = {
-            s.name: AcousticAnalyzer.analyze_stem(s.name, s.audio_data, s.sample_rate)
-            for s in self.current_stems
-        }
-        self._stem_profiles = profiles
-        preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
-        self.current_placements = AutoAtmosDirector.generate_placements(profiles, DirectorPreset(preset_val))
-
-        # Inicializa o player para aferir a duração exata
-        self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
-        track_duration_s = max(1.0, self.live_player.total_duration_s)
-
-        # Arranjo Espacial Automático Dolby Atmos 7.1.4 de Estúdio (Song Structure Intelligence)
-        sections = SongStructureIntelligence.analyze_and_arrange(
-            self.current_stems,
-            track_duration_s,
-            DirectorPreset(preset_val)
-        )
-        self.timeline_manager.set_sections(sections)
-        active_sec = self.timeline_manager.get_active_edit_section()
-        self.current_placements = dict(active_sec.placements)
-
-        # Mapeamento completo de instâncias de áudio (incluindo throw vocal e clones)
-        self._stem_audio_by_instance = {s.name: s for s in self.current_stems}
-        for sec in self.timeline_manager.sections:
-            for inst_name, plc in sec.placements.items():
-                base_name = plc.source_stem_name or (inst_name.split("::")[0] if "::" in inst_name else inst_name)
-                if base_name in self._stem_audio_by_instance:
-                    self._stem_audio_by_instance[inst_name] = self._stem_audio_by_instance[base_name]
-
-        self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
-        self.live_player.set_timeline_manager(self.timeline_manager)
+        for name, preset in (("Equilibrado", DirectorPreset.BALANCED), ("Imersão 360°", DirectorPreset.IMMERSION_360),
+                             ("Palco ao vivo", DirectorPreset.LIVE_STAGE), ("Foco vocal", DirectorPreset.VOCAL_FOCUS),
+                             ("Clube", DirectorPreset.CLUB_BASS)):
+            self.combo_presets.addItem(name, preset.value)
+        self.combo_presets.setAccessibleName("Estilo da direção automática")
+        right.addWidget(self.combo_presets)
+        strength = QHBoxLayout()
+        strength.addWidget(_label("Intensidade"))
+        self.intensity = QSlider(Qt.Horizontal)
+        self.intensity.setAccessibleName("Intensidade da direção automática")
+        self.intensity.setToolTip("Ajusta a abertura dos trechos, a seleção e o ganho dos microeventos ao aplicar a direção.")
+        self.intensity.setRange(0, 100)
+        self.intensity.setValue(70)
+        self.intensity_value = _label("70%", "Clock")
+        self.intensity_value.setMinimumWidth(self.intensity_value.fontMetrics().horizontalAdvance("100%") + 4)
+        self.intensity_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.intensity.valueChanged.connect(lambda v: self.intensity_value.setText(f"{v}%"))
+        strength.addWidget(self.intensity, 1)
+        strength.addWidget(self.intensity_value)
+        right.addLayout(strength)
+        self.btn_direct = QPushButton("Aplicar direção aos trechos")
+        self.btn_direct.clicked.connect(self._redirect)
+        right.addWidget(self.btn_direct)
+
+        self.combo_profile = QComboBox()
+        self.combo_profile.addItem("JBL Bar 1000 MK2", "jbl")
+        self.combo_profile.addItem("Referência de estúdio", "studio")
+        self.combo_profile.setCurrentIndex(max(0, self.combo_profile.findData(self._profile)))
+        self.combo_profile.setAccessibleName("Calibração da pré-escuta e da exportação")
+        self.combo_profile.currentIndexChanged.connect(self._change_profile)
+        right.addWidget(_label("Calibração do master", "Heading"))
+        right.addWidget(self.combo_profile)
+        scroll = QScrollArea()
+        scroll.setAccessibleName("Inspetor e direção")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inspector)
+        scroll.setMinimumWidth(296)
+        self.workspace.addWidget(scroll)
+        self.workspace.setStretchFactor(1, 1)
+        self.workspace.setSizes([208, 884, 308])
+        layout.addWidget(self.workspace, 1)
+
+        self.timeline_widget = TimelineWidget(self.timeline_manager)
+        self.timeline_widget.canvas.has_session = False
         self.timeline_widget.refresh_timeline()
-        self._refresh_sections_combo()
+        self.timeline_widget.section_selected.connect(self._select_section)
+        self.timeline_widget.timeline_edited.connect(self._edited)
+        self.timeline_widget.seek_requested.connect(self._seek)
+        self.timeline_widget.micro_toggled.connect(self._set_micro_enabled)
+        layout.addWidget(self.timeline_widget)
+        transport, foot = _panel("Transport", 0)
+        row = QHBoxLayout()
+        row.setContentsMargins(16, 9, 16, 9)
+        row.setSpacing(10)
+        self.btn_play = QPushButton("Ouvir")
+        self.btn_play.setObjectName("Primary")
+        self.btn_play.setAccessibleName("Ouvir ou pausar a pré-escuta binaural")
+        self.btn_play.clicked.connect(self._toggle_preview)
+        row.addWidget(self.btn_play)
+        self.time_label = _label("00:00 / 00:00", "Clock")
+        row.addWidget(self.time_label)
+        self.seek_bar = QSlider(Qt.Horizontal)
+        self.seek_bar.setRange(0, 10000)
+        self.seek_bar.setAccessibleName("Posição de reprodução")
+        self.seek_bar.valueChanged.connect(lambda v: self._seek(self.live_player.total_duration_s*v/10000))
+        row.addWidget(self.seek_bar, 2)
+        self.combo_audio_dev = QComboBox()
+        self.combo_audio_dev.setAccessibleName("Saída binaural")
+        self.combo_audio_dev.addItem("Binaural  /  Padrão PipeWire", None)
+        self.combo_audio_dev.setMaximumWidth(215)
+        self.combo_audio_dev.currentIndexChanged.connect(
+            lambda: self.live_player.set_output_device(self.combo_audio_dev.currentData()))
+        row.addWidget(self.combo_audio_dev)
+        row.addWidget(_label("Monitor", "Subtle"))
+        self.volume = QSlider(Qt.Horizontal)
+        self.volume.setAccessibleName("Volume da pré-escuta")
+        self.volume.setRange(0, 150)
+        self.volume.setValue(100)
+        self.volume.setMaximumWidth(78)
+        self.volume.valueChanged.connect(lambda v: self.live_player.set_volume(v/100))
+        row.addWidget(self.volume)
+        self.export_btn = QToolButton()
+        self.export_btn.setText("Exportar")
+        self.export_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.export_btn.clicked.connect(self._export_dialog)
+        delivery = QMenu(self.export_btn)
+        delivery.addAction("Exportar arquivo…", self._export_dialog)
+        delivery.addAction("Salvar MP4 para Rygel", self._quick_export)
+        delivery.addAction("Enviar MP4 para a TV via DLNA", lambda: self._quick_export(True))
+        delivery.addAction("Abrir master LPCM no DirectFrame", self._directframe_export)
+        self.export_btn.setMenu(delivery)
+        row.addWidget(self.export_btn)
+        foot.addLayout(row)
+        layout.addWidget(transport)
 
-        self._populate_stems_ui()
-        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
-        self._refresh_cache_button_label()
+        self.status_label = _label("Pronto para abrir uma faixa.", "Status")
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.statusBar().addWidget(self.status_label, 1)
+        self.progress = StudioProgressBar()
+        self.progress.setMinimumWidth(240)
+        self.progress.setMaximumWidth(320)
+        self.progress.setFixedHeight(22)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%p%")
+        self.progress.setAccessibleName("Progresso da operação")
+        self.statusBar().addPermanentWidget(self.progress, 1)
+        self.cancel_btn = QPushButton("Cancelar")
+        self.cancel_btn.clicked.connect(self._cancel)
+        self.statusBar().addPermanentWidget(self.cancel_btn)
+        self.statusBar().setSizeGripEnabled(False)
 
-    def _populate_stems_ui(self):
-        self.lbl_empty_stems.setVisible(False)
-        for card in self.stem_cards.values():
-            card.setParent(None)
-            card.deleteLater()
-        self.stem_cards.clear()
-
-        for instance_name, plc in self.current_placements.items():
-            stem = self._stem_audio_by_instance.get(instance_name) or self._stem_audio_by_instance.get(plc.source_stem_name or instance_name)
-            if not stem:
-                continue
-            if "::spatial_throw" in instance_name:
-                stem = copy.copy(stem)
-                stem.display_name = "Vocal Throw (Satélites Traseiros)"
-                stem.color_hex = "#00E5FF"
-            elif "::" in instance_name:
-                suffix = instance_name.split("::")[-1]
-                stem = copy.copy(stem)
-                stem.display_name = f"{stem.display_name} #{suffix}"
-            card = StemControlCard(stem, plc)
-            card.changed.connect(self._on_stem_card_changed)
-            card.selected.connect(self.room_view.set_active_stem)
-            card.delete_requested.connect(self._delete_placement)
-            card.duplicate_requested.connect(self._duplicate_placement)
-            self.stems_layout.insertWidget(self.stems_layout.count() - 1, card)
-            self.stem_cards[instance_name] = card
-
-    def _duplicate_placement(self, source_name: Optional[str] = None):
-        section = self.timeline_manager.get_active_edit_section()
-        target_name = source_name or self.room_view.active_stem_name
-        source = section.placements.get(target_name) if target_name else None
-        if source is None:
-            if self._placement_clipboard:
-                clip_base = self._placement_clipboard.source_stem_name or self._placement_clipboard.stem_name
-                source = section.placements.get(clip_base)
-                target_name = clip_base
-        if source is None:
+    def _discover_devices(self) -> None:
+        if self._closing:
             return
-        base_name = source.source_stem_name or target_name
-        index = 2
-        while f"{base_name}::{index}" in section.placements:
-            index += 1
-        instance_name = f"{base_name}::{index}"
-        placement = copy.copy(self._placement_clipboard or source)
-        placement.stem_name = instance_name
-        placement.source_stem_name = base_name
-        placement.x = max(-0.95, min(0.95, placement.x + 0.15))
-        placement.y = max(-0.95, min(0.95, placement.y - 0.10))
-        section.placements[instance_name] = placement
-        self._stem_audio_by_instance[instance_name] = self._stem_audio_by_instance[base_name]
-        self.current_placements = section.placements
-        self.live_player.set_active_placements(self.current_placements)
-        self._populate_stems_ui()
-        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
-        self.room_view.active_stem_name = instance_name
-        self.room_view._update_rays_cache()
+        scan = SessionThread(LiveSpatialPlayer.get_available_devices, self)
+        self._device_scan = scan
+        def finished() -> None:
+            self._device_scan = None
+            if not self._closing:
+                with QSignalBlocker(self.combo_audio_dev):
+                    for dev in scan.result or []:
+                        if dev["channels"] >= 2:
+                            self.combo_audio_dev.addItem(dev["name"], dev["index"])
+            else:
+                QTimer.singleShot(0, self.close)
+            scan.deleteLater()
+        scan.finished.connect(finished, Qt.QueuedConnection)
+        scan.start(QThread.LowPriority)
+
+    def _notice(self, text: str, error: bool = False, *, success: bool = False) -> None:
+        self.status_label.setText(text)
+        self.status_label.setToolTip(text)
+        self.status_label.setProperty("error", error)
+        self.status_label.setProperty("success", success)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+
+    def _set_reduced_motion(self, on: bool) -> None:
+        self.settings.setValue("ui/reducedMotion", on)
+        self.room_view.reduced_motion = on
+        self.ui_poll_timer.setInterval(100 if on else 16)
+        self._preview_ui = None
+        self._poll_audio_state()
+
+    def _update_theme_button(self) -> None:
+        if self._current_theme == "light":
+            self.btn_theme.setText("☀️ Claro")
+            self.btn_theme.setToolTip("Tema visual: Claro. Clique para alternar para Escuro AMOLED.")
+        else:
+            self.btn_theme.setText("🌙 AMOLED")
+            self.btn_theme.setToolTip("Tema visual: Escuro AMOLED. Clique para alternar para Claro.")
+
+    def _toggle_theme(self) -> None:
+        target = "light" if self._current_theme == "amoled" else "amoled"
+        self._set_theme(target)
+
+    def _set_theme(self, theme_name: str) -> None:
+        if theme_name not in T.THEMES:
+            theme_name = "amoled"
+        self._current_theme = theme_name
+        self.settings.setValue("ui/theme", theme_name)
+        T.set_active_theme(theme_name)
+        self.setStyleSheet(T.style_sheet(theme_name))
+        self._update_theme_button()
+        for idx in range(self.source_list.count()):
+            item = self.source_list.item(idx)
+            item.setForeground(QColor(T.INK))
         self.room_view.update()
-        self._on_room_stem_selected(instance_name)
-        self.statusBar().showMessage(
-            f"✨ Nova instância criada: '{instance_name}'. Posicione-a livremente na sala ou teto!",
-            4000
-        )
-
-    def _delete_placement(self, instance_name: str):
-        if instance_name not in self.stem_cards or "::" not in instance_name:
-            return
-        base_name = instance_name.split("::")[0]
-        section = self.timeline_manager.get_active_edit_section()
-        section.placements.pop(instance_name, None)
-        self._stem_audio_by_instance.pop(instance_name, None)
-        self.current_placements = section.placements
-        self.stem_cards.pop(instance_name, None)
-        self._populate_stems_ui()
-        self.live_player.set_active_placements(self.current_placements)
-        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
-        if self.room_view.active_stem_name == instance_name:
-            self.room_view.set_active_stem(base_name)
-        self.statusBar().showMessage(f"🗑️ Instância '{instance_name}' removida.", 3000)
-
-    def _on_preset_selected(self):
-        if not self.current_stems:
-            return
-        preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
-        self.current_placements = AutoAtmosDirector.generate_placements(
-            self._stem_profiles, DirectorPreset(preset_val)
-        )
-
-        # Atualiza a seção atual da timeline com o novo preset
-        active_sec = self.timeline_manager.get_active_edit_section()
-        active_sec.placements = {k: v for k, v in self.current_placements.items()}
-        
-        for name, card in self.stem_cards.items():
-            card.placement = self.current_placements[name]
-            card.sync_from_placement()
-        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
-        self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
-
-    def _on_room_placement_changed(self, stem_name: str, x: float, y: float, z: float):
-        if stem_name in self.stem_cards:
-            self.stem_cards[stem_name].sync_coords_from_placement(x, y, z)
-        # Salva o posicionamento na seção ativa da timeline
-        active_sec = self.timeline_manager.get_active_edit_section()
-        if stem_name in active_sec.placements:
-            active_sec.placements[stem_name].x = x
-            active_sec.placements[stem_name].y = y
-            active_sec.placements[stem_name].z = z
-        self.live_player.update_placement(stem_name, x, y, z)
-
-    def _on_room_stereo_toggled(self, stem_name: str, is_stereo: bool):
-        if stem_name in self.stem_cards:
-            self.stem_cards[stem_name].sync_from_placement()
-        active_sec = self.timeline_manager.get_active_edit_section()
-        if stem_name in active_sec.placements:
-            active_sec.placements[stem_name].is_stereo = is_stereo
-        plc = self.current_placements.get(stem_name)
-        if plc:
-            plc.is_stereo = is_stereo
-            self.live_player.update_placement(stem_name, plc.x, plc.y, plc.z, is_stereo=is_stereo)
-        status_msg = f"{stem_name}: Espelhamento Estéreo {'ATIVADO (L / R)' if is_stereo else 'DESATIVADO (Mono)'}"
-        self.statusBar().showMessage(status_msg, 3000)
-
-    def _on_room_stem_selected(self, stem_name: str):
-        for name, card in self.stem_cards.items():
-            is_active = (name == stem_name)
-            card.set_selected(is_active)
-            if is_active:
-                self.scroll_stems.ensureWidgetVisible(card)
-                z_pct = int(round(card.placement.z * 100))
-                self.statusBar().showMessage(
-                    f"Instrumento: {card.stem.display_name} (Altura Z: {z_pct}%) • "
-                    f"Scroll = Altura Z • Tecla 'D' = Espelhar Estéreo (L/R) • Tecla '0' = Centralizar"
-                )
-
-    def _on_stem_card_changed(self, stem_name: str):
-        plc = self.current_placements[stem_name]
-        # Salva na seção ativa da timeline
-        active_sec = self.timeline_manager.get_active_edit_section()
-        active_sec.placements[stem_name] = plc
-
-        self.room_view.update_placement(stem_name, plc.x, plc.y, plc.z, is_stereo=plc.is_stereo)
-        self.live_player.update_placement(
-            stem_name,
-            plc.x,
-            plc.y,
-            plc.z,
-            spread=plc.spread,
-            lfe=plc.lfe_send,
-            is_stereo=plc.is_stereo
-        )
-        self.live_player.set_active_placements(self.current_placements)
-
-    # --- Sincronização de Automação por Trechos (Timeline) ---
-    def _refresh_sections_combo(self):
-        """Atualiza a caixa de seleção de trechos para navegação rápida e transparente."""
-        self.combo_sections.blockSignals(True)
-        self.combo_sections.clear()
-        sections = self.timeline_manager.sections
-        active_id = self.timeline_manager.active_edit_section_id
-        active_idx = 0
-        for i, sec in enumerate(sections):
-            label = f"{i+1}. {sec.name} ({sec.start_time_s:.1f}s - {sec.end_time_s:.1f}s)"
-            self.combo_sections.addItem(label, sec.id)
-            if sec.id == active_id:
-                active_idx = i
-        if self.combo_sections.count() > 0:
-            self.combo_sections.setCurrentIndex(active_idx)
-        self.combo_sections.blockSignals(False)
-
-    def _on_combo_section_changed(self, index: int):
-        sec_id = self.combo_sections.currentData()
-        if sec_id and sec_id != self.timeline_manager.active_edit_section_id:
-            self.timeline_manager.active_edit_section_id = sec_id
-            self._on_timeline_section_selected(sec_id)
-            self.timeline_widget.refresh_timeline()
-
-    def _on_split_here_button_clicked(self):
-        if not self.current_stems:
-            self.statusBar().showMessage("Carregue uma música antes de dividir em trechos.")
-            return
-        cur_s, tot_s, _, _, _ = self.live_player.get_ui_snapshot()
-        if cur_s <= 0.5 or cur_s >= (tot_s - 0.5):
-            ratio = float(self.slider_time.value()) / 1000.0
-            cur_s = ratio * tot_s
-        new_sec = self.timeline_manager.split_section_at(cur_s)
-        if new_sec:
-            self._refresh_sections_combo()
-            self._on_timeline_section_selected(new_sec.id)
-            self.timeline_widget.refresh_timeline()
-            self.statusBar().showMessage(
-                f"✂️ Novo trecho criado aos {cur_s:.1f}s! Ajuste as vozes ou instrumentos para este trecho.",
-                5000
-            )
-
-    def _on_timeline_section_selected(self, sec_id: str):
-        sec = self.timeline_manager.get_section_by_id(sec_id)
-        if not sec:
-            return
-
-        self.current_placements = sec.placements
-        self.live_player.set_active_placements(self.current_placements)
-
-        # Se houver instâncias dinâmicas novas (ex: vocal throw no refrão), recria cards
-        if set(self.stem_cards.keys()) != set(self.current_placements.keys()):
-            self._populate_stems_ui()
-        else:
-            for name, card in self.stem_cards.items():
-                if name in self.current_placements:
-                    card.placement = self.current_placements[name]
-                    card.sync_from_placement()
-
-        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
-
-        # Se não estiver tocando, pula o cursor da timeline e atualiza a pré-visualização 3D para o início do trecho
-        if not self.live_player.is_playing:
-            self.live_player.seek_seconds(sec.start_time_s)
-            self.timeline_widget.set_current_playback_time(sec.start_time_s)
-            tot_s = max(1.0, self.live_player.total_duration_s)
-            self.slider_time.blockSignals(True)
-            self.slider_time.setValue(int((sec.start_time_s / tot_s) * 1000))
-            self.slider_time.blockSignals(False)
-            c_m, c_sec = int(sec.start_time_s // 60), int(sec.start_time_s % 60)
-            t_m, t_sec = int(tot_s // 60), int(tot_s % 60)
-            self.lbl_time.setText(f"{c_m:02d}:{c_sec:02d} / {t_m:02d}:{t_sec:02d}")
-            self._update_dynamic_playback_ui(sec.start_time_s)
-
-        # Sincroniza a caixa suspensa sem disparar eventos circulares
-        self.combo_sections.blockSignals(True)
-        for i in range(self.combo_sections.count()):
-            if self.combo_sections.itemData(i) == sec_id:
-                self.combo_sections.setCurrentIndex(i)
-                break
-        self.combo_sections.blockSignals(False)
-
-        self.statusBar().showMessage(
-            f"Editando trecho: '{sec.name}' ({sec.start_time_s:.1f}s - {sec.end_time_s:.1f}s) • Ajuste os instrumentos na sala para este momento da faixa"
-        )
-
-    def _on_ia_maestro_clicked(self):
-        """Dispara a inteligência musical para analisar a música e gerar arranjo 7.1.4 de estúdio."""
-        if not self.current_stems:
-            self.statusBar().showMessage("Carregue uma faixa antes de acionar o IA Maestro.")
-            return
-
-        preset_val = self.combo_presets.currentData() or DirectorPreset.BALANCED.value
-        track_duration_s = max(1.0, self.live_player.total_duration_s)
-
-        self.statusBar().showMessage("✨ IA Maestro analisando dinâmica, energia e arranjando em Dolby Atmos 7.1.4...")
-        sections = SongStructureIntelligence.analyze_and_arrange(
-            self.current_stems,
-            track_duration_s,
-            DirectorPreset(preset_val)
-        )
-        self.timeline_manager.set_sections(sections)
-        active_sec = self.timeline_manager.get_active_edit_section()
-        self.current_placements = dict(active_sec.placements)
-
-        self._stem_audio_by_instance = {s.name: s for s in self.current_stems}
-        for sec in self.timeline_manager.sections:
-            for inst_name, plc in sec.placements.items():
-                base_name = plc.source_stem_name or (inst_name.split("::")[0] if "::" in inst_name else inst_name)
-                if base_name in self._stem_audio_by_instance:
-                    self._stem_audio_by_instance[inst_name] = self._stem_audio_by_instance[base_name]
-
-        self.live_player.set_stems_and_placements(self.current_stems, self.current_placements)
-        self.live_player.set_timeline_manager(self.timeline_manager)
         self.timeline_widget.refresh_timeline()
-        self._refresh_sections_combo()
-        self._populate_stems_ui()
-        self.room_view.set_stems_and_placements(self.current_stems, self.current_placements)
 
-        self.statusBar().showMessage(
-            f"✨ IA Maestro concluiu o arranjo: {len(sections)} trechos musicais com automação dinâmica 7.1.4 e vocal throws!",
-            6000
-        )
+    def _sync_enabled(self) -> None:
+        busy = self._task is not None
+        ready = bool(self.current_stems)
+        self.btn_open.setEnabled(not busy)
+        self.combo_mode.setEnabled(not busy)
+        self.cache_action.setEnabled(not busy)
+        self.search_action.setEnabled(not busy)
+        self.reanalyze_action.setEnabled(ready and not busy)
+        self.btn_play.setEnabled(ready)
+        self.seek_bar.setEnabled(ready)
+        self.workspace.setEnabled(not busy)
+        self.timeline_widget.setEnabled(ready and not busy)
+        self.export_btn.setEnabled(ready and not busy)
+        self.btn_direct.setEnabled(ready and not busy)
+        self.progress.setVisible(busy)
+        self.cancel_btn.setVisible(busy and self._task not in ("delivery", "clear-cache"))
+        self.empty_sources.setVisible(not ready)
+        self.source_list.setVisible(ready)
 
-    def _on_timeline_split_requested(self, split_time_s: float):
+    def _base_request(self, action: str) -> dict:
+        return {"action": action, "mode": self.session.get("mode", self.combo_mode.currentData()),
+                "cache": str(self.cache_manager.base_dir), "preset": self.combo_presets.currentData(),
+                "profile": self._profile, "intensity": self.intensity.value()/100}
+
+    def _start(self, request: dict, message: str) -> bool:
+        if self._task is not None:
+            return False
+        self._task = request["action"]
+        self._cancelled = False
+        self._result = None
+        self._failure = ""
+        self._stdout = b""
+        self._stderr = b""
+        self._request = request
+        self._notice(message)
+        self.progress.setRange(0, 0)
+        self._sync_enabled()
+        proc = QProcess(self)
+        self._proc = proc
+        env = QProcessEnvironment.systemEnvironment()
+        # Os pools BLAS são criados ao importar NumPy, antes do main do processo.
+        from ..separation.process_shield import get_shielded_thread_count
+        threads = str(get_shielded_thread_count())
+        for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            env.insert(key, threads)
+        env.insert("HF_HUB_OFFLINE", "1")
+        for key in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+            env.insert(key, "")
+        env.insert("ATMOSSPLIT_PARENT_PID", str(os.getpid()))
+        proc.setProcessEnvironment(env)
+        if sys.platform == "linux":
+            proc.setUnixProcessParameters(QProcess.UnixProcessFlag.CreateNewSession)
+        proc.setWorkingDirectory(str(ROOT))
+        proc.setProgram(sys.executable)
+        proc.setArguments(["-m", "src.separation.supervisor", "-m", "src.ui.studio_jobs"])
+        payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
+        def send_request() -> None:
+            if self._cancelled or self._closing:
+                proc.closeWriteChannel()
+                proc.terminate()
+                return
+            proc.write(payload)
+            proc.closeWriteChannel()
+        proc.started.connect(send_request)
+        proc.readyReadStandardOutput.connect(lambda: self._read_events(proc))
+        proc.readyReadStandardError.connect(lambda: self._read_stderr(proc))
+        proc.errorOccurred.connect(lambda error: self._process_error(proc, error))
+        proc.finished.connect(lambda code, status: self._process_finished(proc, code))
+        proc.start()
+        return True
+
+    def _read_events(self, proc: QProcess) -> None:
+        if proc is not self._proc:
+            return
+        self._stdout += bytes(proc.readAllStandardOutput())
+        lines = self._stdout.split(b"\n")
+        self._stdout = lines.pop()
+        for line in lines:
+            try:
+                data = json.loads(line)
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            kind = data.get("type")
+            if kind == "done":
+                self._result = data.get("result")
+            elif kind == "error":
+                self._failure = data["text"]
+            elif kind == "progress" and not self._cancelled:
+                value = data.get("value", -1)
+                self.progress.setRange(0, 100 if value >= 0 else 0)
+                if value >= 0:
+                    percent = round(value * 100)
+                    if self._task == "prepare":
+                        # A etapa do worker termina antes da montagem local do monitor.
+                        percent = min(percent, PREVIEW_PROGRESS - 1)
+                    self.progress.setValue(percent)
+                self._notice(data["text"])
+
+    def _read_stderr(self, proc: QProcess) -> None:
+        if proc is self._proc:
+            self._stderr = (self._stderr + bytes(proc.readAllStandardError()))[-6000:]
+
+    def _process_error(self, proc: QProcess, error) -> None:
+        if error == QProcess.FailedToStart and proc is self._proc:
+            self._failure = proc.errorString()
+            self._process_finished(proc, -1)
+
+    def _process_finished(self, proc: QProcess, code: int) -> None:
+        if proc is not self._proc:
+            return
+        self._read_events(proc)
+        self._read_stderr(proc)
+        proc.deleteLater()
+        self._proc = None
+        if self._cancelled:
+            self._end_task("Operação cancelada.")
+            return
+        if code != 0 or self._result is None:
+            error = self._failure or self._stderr.decode("utf8", errors="replace").strip() or "O processo encerrou sem resultado."
+            self._end_task(error, error=True)
+            return
+        result, action = self._result, self._task
+        try:
+            if action == "prepare":
+                self._prepare_preview(result)
+            elif action == "redirect":
+                self.timeline_manager.set_sections(unpack_sections(result["sections"]))
+                self.session["preset"] = self.combo_presets.currentData()
+                self.session["intensity"] = self.intensity.value()
+                self._manual = False
+                self._activate_section(self.timeline_manager.get_section_at_time(self.live_player.current_time_s).id)
+                self._publish()
+                self._preview_ui = None
+                self._poll_audio_state()
+                self._queue_save()
+                self._end_task("Direção aplicada às seções.")
+            elif action == "export":
+                self._export_complete(result)
+            elif action == "search":
+                self._end_task("")
+                self._show_search_results(result["results"])
+            elif action == "download":
+                self._end_task("")
+                self._load_and_process_audio_path(result["path"])
+        except Exception as exc:
+            log.exception("Falha ao concluir %s", action)
+            self._end_task(str(exc), error=True)
+
+    def _end_task(self, text: str, error: bool = False, *, success: bool = False) -> None:
+        self._task = None
+        if self._export_stage:
+            self._export_stage.cleanup()
+            self._export_stage = None
+        self._sync_enabled()
+        if text:
+            self._notice(text, error, success=success)
+        if self._closing:
+            QTimer.singleShot(0, self.close)
+
+    def _thread_job(self, fn, on_done) -> None:
+        thread = SessionThread(fn, self)
+        self._thread = thread
+        def finished() -> None:
+            self._thread = None
+            try:
+                if self._cancelled:
+                    self._end_task("Operação cancelada.")
+                elif thread.error:
+                    self._end_task(thread.error, error=True)
+                else:
+                    on_done(thread.result)
+            except Exception as exc:
+                log.exception("Falha ao instalar a sessão")
+                self._end_task(str(exc), error=True)
+            finally:
+                thread.deleteLater()
+        thread.finished.connect(finished, Qt.QueuedConnection)
+        thread.start(QThread.LowPriority)
+
+    def _cancel(self) -> None:
+        self._cancelled = True
+        self._notice("Encerrando a operação…")
+        proc = self._proc
+        if proc and proc.state() != QProcess.NotRunning:
+            # O supervisor permanece vivo até recolher o último descendente.
+            proc.terminate()
+        if self._thread:
+            self._thread.requestInterruption()
+
+    def _open(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Abrir faixa", str(Path.home() / "Music"), AUDIO_FILTER)
+        if path:
+            self._load_and_process_audio_path(path)
+
+    def _load_and_process_audio_path(self, path: str, restore: bool = True) -> None:
+        self._save_arrangement()
+        request = self._base_request("prepare")
+        request.update(path=str(path), mode=self.combo_mode.currentData(), restore=restore, session_dir=str(self.session_dir))
+        if not restore and path == self.session.get("path"):
+            request["micro_enabled"] = self.timeline_widget.btn_micro.isChecked()
+        self._start(request, "Preparando a faixa…")
+
+    def _prepare_preview(self, result: dict) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(PREVIEW_PROGRESS)
+        self._notice("Montando o monitor binaural e preparando palco 7.1.4…")
+        mode = self._request["mode"]
+        result["mode"] = mode
+        timeline = SpatialTimelineManager()
+        sections = unpack_sections(result.pop("sections"))
+        timeline.set_sections(sections)
+        restored = result["restored"]
+        profile, cache = self._profile, self.cache_manager
+        def load():
+            stems = DeepStemEngine(cache).load_cached_result(result["hash"], mode)
+            if not stems:
+                raise RuntimeError("O cache ficou indisponível. Abra a faixa novamente.")
+            player = LiveSpatialPlayer(sample_rate=48000, profile=profile)
+            if not QThread.currentThread().isInterruptionRequested():
+                player.set_timeline_manager(timeline)
+                player.set_stems_and_placements(stems.stems, timeline.get_active_edit_section().placements)
+            return stems.stems, player
+        def install(data):
+            stems, player = data
+            self.live_player.stop()
+            self.live_player = player
+            self.live_player.set_output_device(self.combo_audio_dev.currentData())
+            self.live_player.set_volume(self.volume.value()/100)
+            self.current_stems = stems
+            self._sources = {s.name: s for s in stems}
+            self.session = result
+            self._clipboard = None
+            self._manual = bool(restored and result.get("manual"))
+            self._dirty = False
+            self.timeline_manager = timeline
+            self.timeline_widget.timeline_manager = timeline
+            self.timeline_widget.canvas.timeline_manager = timeline
+            self.timeline_widget.canvas.has_session = True
+            self.timeline_widget.canvas.set_view(1.0, 0.0)
+            self.track_label.setText(f"{result['artist']}   /   {result['title']}")
+            self.track_label.setToolTip(str(result["path"]))
+            self.combo_presets.setCurrentIndex(max(0, self.combo_presets.findData(result["preset"])))
+            self.intensity.setValue(result["intensity"])
+            self._activate_section(timeline.get_active_edit_section().id)
+            self._preview_ui = None
+            self._poll_audio_state()
+            self.progress.setValue(100)
+            warning = result.get("warning")
+            self._end_task(warning or ("Concluído · Automação restaurada." if restored else
+                           "Concluído · Faixa pronta para ouvir e editar."), success=not warning)
+            if not restored or result.get("micro_migrated"):
+                self._queue_save()
+        self._thread_job(load, install)
+
+    def _activate_section(self, section_id: str) -> None:
+        sec = self.timeline_manager.get_section_by_id(section_id)
+        if sec is None:
+            return
+        self.timeline_manager.active_edit_section_id = section_id
+        previous = self.room_view.active_stem_name
+        self.room_view.set_stems_and_placements(self.current_stems, sec.placements)
+        with QSignalBlocker(self.source_list):
+            self.source_list.clear()
+            for name, stem in self.room_view.stems.items():
+                item = QListWidgetItem(stem.display_name)
+                item.setData(Qt.UserRole, name)
+                item.setForeground(QColor(T.INK))
+                item.setToolTip(stem.display_name)
+                swatch = self._source_swatch(stem.color_hex)
+                item.setIcon(swatch)
+                self.source_list.addItem(item)
+            self.source_list.setCurrentRow(-1)
+        name = previous if previous in self.room_view.stems else self.room_view.active_stem_name
+        self._choose_source(name)
+        self.timeline_widget.refresh_timeline()
+        self.source_count.setText(f"{len(sec.placements)} fontes neste trecho")
+        self._update_item_states()
+
+    def _source_swatch(self, color: str) -> QIcon:
+        swatch = QPixmap(5, 16)
+        swatch.fill(QColor(color))
+        return QIcon(swatch)
+
+    def _update_item_states(self) -> None:
+        plcs = self.current_placements
+        for idx in range(self.source_list.count()):
+            item = self.source_list.item(idx)
+            name = item.data(Qt.UserRole)
+            plc = plcs[name]
+            stem = self.room_view.stems.get(name) or self._sources.get(plc.source_stem_name or name)
+            if stem:
+                suffix = "   [Mudo]" if plc.is_muted else ("   [Solo]" if plc.is_solo else "")
+                item.setText(stem.display_name + suffix)
+
+    def _choose_source(self, name: str | None) -> None:
+        if self._inspector:
+            self.inspector_slot.removeWidget(self._inspector)
+            self._inspector.hide()
+            self._inspector.deleteLater()
+            self._inspector = None
+        self.inspector_hint.setVisible(name is None)
+        if not name or name not in self.current_placements or name not in self.room_view.stems:
+            return
+        # A seleção pelo mapa e pela lista compartilha a mesma identidade da instância.
+        with QSignalBlocker(self.room_view):
+            self.room_view.set_active_stem(name)
+        with QSignalBlocker(self.source_list):
+            for i in range(self.source_list.count()):
+                if self.source_list.item(i).data(Qt.UserRole) == name:
+                    self.source_list.setCurrentRow(i)
+                    break
+        card = StemControlCard(self.room_view.stems[name], self.current_placements[name])
+        card.changed.connect(self._card_changed)
+        card.duplicate_requested.connect(self._duplicate)
+        card.delete_requested.connect(self._delete)
+        self.inspector_slot.addWidget(card)
+        self._inspector = card
+
+    def _select_list_source(self, item, previous) -> None:
+        if item:
+            self._choose_source(item.data(Qt.UserRole))
+
+    def _card_changed(self, name: str) -> None:
+        p = self.current_placements[name]
+        self.room_view.update_placement(name, p.x, p.y, p.z, p.is_stereo)
+        self._update_item_states()
+        self._edited()
+
+    def _stereo_changed(self, name: str, stereo: bool) -> None:
+        if name in self.current_placements:
+            self.current_placements[name].is_stereo = stereo
+
+    def _room_changed(self, name: str, x: float, y: float, z: float) -> None:
+        if name in self.current_placements:
+            p = self.current_placements[name]
+            p.x, p.y, p.z = x, y, z
+            if self._inspector and self._inspector.placement is p:
+                self._inspector.sync_from_placement()
+            self._edited()
+
+    def _publish(self) -> None:
+        self.live_player.set_active_placements(self.current_placements)
+
+    def _edited(self) -> None:
+        self._manual = True
+        self._publish()
+        self._preview_ui = None
+        self._queue_save()
+
+    def _set_micro_enabled(self, enabled: bool) -> None:
+        if not self.session:
+            return
+        for section in self.timeline_manager.sections:
+            section.micro_enabled = enabled
+        self.timeline_widget.refresh_timeline()
+        self._publish()
+        self._preview_ui = None
+        self._poll_audio_state()
+        self._queue_save()
+
+    def _queue_save(self) -> None:
+        self._dirty = True
+        self.save_timer.start()
+
+    def _copy(self, name: str) -> None:
+        if name in self.current_placements:
+            self._clipboard = copy.copy(self.current_placements[name])
+            self._notice(f"Posição copiada de {self.room_view.stems[name].display_name}.")
+
+    def _paste(self) -> None:
+        if self._clipboard:
+            self._duplicate(self._clipboard.stem_name, self._clipboard)
+        elif self.room_view.active_stem_name:
+            self._duplicate(self.room_view.active_stem_name)
+
+    def _duplicate(self, name: str, copied: SpatialPlacement | None = None) -> None:
+        original = copied or self.current_placements.get(name)
+        if original is None:
+            return
+        base = original.source_stem_name or name.split("::")[0]
+        if base not in self._sources:
+            return
+        i = 2
+        while f"{base}::{i}" in self.current_placements:
+            i += 1
+        p = copy.copy(original)
+        p.stem_name, p.source_stem_name = f"{base}::{i}", base
+        if copied is None:
+            p.x = min(1.0, p.x+0.1)
+        self.current_placements[p.stem_name] = p
+        self._activate_section(self.timeline_manager.active_edit_section_id)
+        self._choose_source(p.stem_name)
+        self._edited()
+
+    def _delete(self, name: str) -> None:
+        if name in self.current_placements and "::" in name:
+            del self.current_placements[name]
+            self._activate_section(self.timeline_manager.active_edit_section_id)
+            self._edited()
+
+    def _select_section(self, section_id: str) -> None:
+        self._activate_section(section_id)
         sec = self.timeline_manager.get_active_edit_section()
-        self._refresh_sections_combo()
-        self._on_timeline_section_selected(sec.id)
-        self.statusBar().showMessage(f"Novo trecho criado em {split_time_s:.3f}s. Ajuste as posições para este trecho.")
+        self._seek(sec.start_time_s)
+        self._notice(sec.description or sec.name)
 
-    def _on_timeline_renamed(self, sec_id: str, new_name: str):
-        self._refresh_sections_combo()
-        self.statusBar().showMessage(f"Trecho renomeado para '{new_name}'.")
+    def _poll_audio_state(self) -> None:
+        _immunize_cpython_none_refcount()
+        cur, duration, vu, sub, playing = self.live_player.get_ui_snapshot()
+        state = (cur, duration, playing, self.live_player.last_error, self.live_player.underruns)
+        if state == self._preview_ui:
+            return
+        previous = self._preview_ui
+        self._preview_ui = state
+        if previous is None or (int(cur), int(duration)) != (int(previous[0]), int(previous[1])):
+            self.time_label.setText(f"{_clock(cur)} / {_clock(duration)}")
+        if not self.seek_bar.isSliderDown():
+            with QSignalBlocker(self.seek_bar):
+                self.seek_bar.setValue(round(cur/max(0.001, duration)*10000))
+        self.timeline_widget.set_current_playback_time(cur)
+        if self.current_stems and not self.room_view._is_dragging and (
+                playing or previous is None or cur != previous[0] or playing != previous[2]):
+            sec = self.timeline_manager.get_section_at_time(cur)
+            if sec.id != self.timeline_manager.active_edit_section_id:
+                self._activate_section(sec.id)
+            poses = self.timeline_manager.get_interpolated_placements(cur)
+            events = tuple(ev for ev in self.timeline_widget.canvas.micro_lane.active_at(cur)
+                           if f"{ev.stem}::micro" in poses)
+            if self.reduced_motion.isChecked() and playing:
+                # Mostra um ponto estável por evento, sem animar trajetórias ou medidores.
+                if previous is None or events != self.room_view.micro_events:
+                    self.room_view.set_playback_placements({**sec.placements,
+                        **{key: p for key, p in poses.items() if key.endswith("::micro")}})
+            else:
+                self.room_view.set_playback_placements(poses)
+            self.room_view.set_micro_events(events)
+            # Uma sílaba pode durar menos que o tempo de leitura do nome.
+            # Na pausa ou no seek, a legenda volta a corresponder exatamente ao cursor.
+            recent = (not events and playing and previous is not None and sec.micro_enabled
+                      and 0 <= cur-previous[0] < .25 and bool(self._caption_events)
+                      and 0 <= cur-max(ev.end_s for ev in self._caption_events) < .9)
+            self._show_event_caption(self._caption_events if recent else events, recent)
+        self.room_view.set_vu_levels(vu if playing else {}, sub if playing else 0)
+        if previous is None or playing != previous[2]:
+            self.btn_play.setText("Pausar" if playing else "Ouvir")
+        if state[3] and (previous is None or state[3] != previous[3]):
+            self._notice(f"Saída de áudio indisponível. {state[3]}", error=True)
+        if previous is None or state[4] != previous[4]:
+            self.combo_audio_dev.setToolTip(f"Monitor binaural em dois canais. Falhas de buffer: {state[4]}.")
 
-    def _on_timeline_removed(self, sec_id: str):
-        active_sec = self.timeline_manager.get_active_edit_section()
-        self._refresh_sections_combo()
-        self._on_timeline_section_selected(active_sec.id)
-        self.statusBar().showMessage("Trecho removido e fundido com o vizinho.")
+    def _show_event_caption(self, events: tuple, recent: bool) -> None:
+        if events == self._caption_events and recent == self._caption_recent:
+            return
+        self._caption_events, self._caption_recent = events, recent
+        caption = "   /   ".join(event_title(ev) for ev in events)
+        if recent:
+            caption = f"Anterior  ·  {caption}"
+        self.event_caption.setText(caption)
+        detail = "\n\n".join(event_details(ev) for ev in events)
+        self.event_caption.setToolTip(detail)
+        self.event_caption.setAccessibleDescription(detail)
 
-    def _on_timeline_seek_requested(self, time_s: float):
-        self.live_player.seek_seconds(time_s)
-        self._update_dynamic_playback_ui(time_s)
-
-    def _toggle_preview_playback(self):
+    def _toggle_preview(self) -> None:
         if not self.current_stems:
             return
-
         if self.live_player.is_playing:
             self.live_player.pause()
-            self.btn_play.setText("▶ Play (Espaço)")
         else:
+            if self.live_player.current_time_s >= self.live_player.total_duration_s - 0.001:
+                self.live_player.seek_seconds(0.0)
             self.live_player.play()
-            self.btn_play.setText("⏸ Pausar (Espaço)")
+        self._poll_audio_state()
 
-    def _on_seek_moved(self, val: int):
-        ratio = float(val) / 1000.0
-        tot_s = max(1.0, self.live_player.total_duration_s)
-        time_s = ratio * tot_s
-        self.live_player.seek(ratio)
-        self._update_dynamic_playback_ui(time_s)
+    def _seek(self, time_s: float) -> None:
+        if self.current_stems:
+            self.live_player.seek_seconds(time_s)
+            self._preview_ui = None
+            self._poll_audio_state()
 
-    def _on_quick_export_clicked(self):
-        if not self.current_stems:
-            QMessageBox.warning(self, "Exportação", "Nenhuma faixa carregada.")
+    def _seek_relative(self, seconds: float) -> None:
+        self._seek(max(0.0, min(self.live_player.total_duration_s, self.live_player.current_time_s + seconds)))
+
+    def _confirm_direction(self) -> bool:
+        if not self._manual:
+            return True
+        return QMessageBox.question(self, "Substituir ajustes manuais?",
+                                    "A direção vai recalcular as posições e os volumes que você editou.",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _redirect(self) -> None:
+        if self.session and self._confirm_direction():
+            req = self._base_request("redirect")
+            req.update(hash=self.session["hash"], sections=pack_sections(self.timeline_manager.sections))
+            self._start(req, "Aplicando o estilo às seções musicais…")
+
+    def _reanalyze(self) -> None:
+        if self.session and self._confirm_direction():
+            self._load_and_process_audio_path(self.session["path"], restore=False)
+
+    def _change_profile(self) -> None:
+        requested = self.combo_profile.currentData()
+        if self._profile == requested:
             return
-
-        out_dir = Path.home() / "Music" / "DolbyAtmos"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        dest = out_dir / f"{self.lbl_track_title.text()} [Dolby Atmos 7.1.4].mp4".replace("/", "-")
-
-        num_sections = len(self.timeline_manager.sections)
-        msg_extra = f" ({num_sections} trechos automatizados)" if num_sections > 1 else ""
-        self.statusBar().showMessage(f"Renderizando faixa completa em Dolby Digital Plus + Dolby Atmos 7.1.4 (E-AC-3 JOC){msg_extra}...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            matrix_714 = self.renderer.render_to_multichannel_714(
-                self.current_stems,
-                self.current_placements,
-                config=RenderConfig(sample_rate=48000, apply_lufs_norm=True),
-                timeline_manager=self.timeline_manager
-            )
-            saved = AudioExporter714.export(
-                multichannel_matrix=matrix_714,
-                output_path=dest,
-                sample_rate=48000,
-                export_format=ExportFormat.MP4_ATMOS_JOC_714,
-                metadata=self.current_source.metadata if self.current_source else None
-            )
-            QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage(f"Salvo em {saved.name} (Dolby Atmos JOC real no Rygel / Wi-Fi)!")
-            QMessageBox.information(
-                self,
-                "Exportação Concluída para Wi-Fi / TV",
-                f"Música inteira salva com sucesso em:\n{saved}\n\n"
-                f"📡 Dolby Atmos Real (E-AC-3 JOC):\n"
-                f"• Contém 12 objetos dinâmicos e metadados OAMD/JOC com canais de teto (.4) ativos!\n"
-                f"• Inclui todas as {num_sections} variações espaciais definidas na linha do tempo!\n"
-                f"• Salvo na pasta monitorada pelo Rygel ({out_dir}).\n"
-                f"• Transmita via Wi-Fi no celular (BubbleUPnP / Symfonium) ou TV Samsung para acionar DOLBY ATMOS na JBL Bar 1000!"
-            )
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Erro", f"Falha na exportação: {e}")
-
-    def _on_export_clicked(self):
-        if not self.current_stems:
-            QMessageBox.warning(self, "Exportação", "Nenhuma faixa carregada para exportação.")
-            return
-
-        out_dir = Path.home() / "Music" / "DolbyAtmos"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        default_name = f"{self.lbl_track_title.text()} [Dolby Atmos 7.1.4].mp4".replace("/", "-")
-
-        file_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Salvar Mixagem Espacial",
-            str(out_dir / default_name),
-            "MP4 Dolby Digital Plus + Dolby Atmos 7.1.4 [E-AC-3 JOC / Wi-Fi / TV / DLNA] (*.mp4);;"
-            "MKV LPCM 7.1.4 12ch [Lossless Discreto / Cabo HDMI / DirectFrame] (*.mkv);;"
-            "MKV Dolby Atmos 7.1.4 [E-AC-3 JOC] (*.mkv);;"
-            "WAV 7.1.4 12ch Descompactado Studio Master (*.wav);;"
-            "EC3 Dolby Atmos 7.1.4 [Bitstream E-AC-3 JOC Puro] (*.ec3)"
-        )
-        if not file_path:
-            return
-
-        export_fmt = ExportFormat.MP4_ATMOS_JOC_714
-        if file_path.endswith(".wav") or "WAV" in selected_filter:
-            export_fmt = ExportFormat.WAV_714
-        elif "LPCM 7.1.4" in selected_filter:
-            export_fmt = ExportFormat.MKV_LPCM_714
-        elif file_path.endswith(".ec3") or "EC3" in selected_filter:
-            export_fmt = ExportFormat.EC3_ATMOS_714
-        elif "MKV Dolby Atmos" in selected_filter or file_path.endswith(".mkv"):
-            export_fmt = ExportFormat.MKV_ATMOS_JOC_714
+        if self.current_stems:
+            if self._task is not None:
+                return
+            self._task = "profile"
+            self._cancelled = False
+            self._sync_enabled()
+            self._notice("Preparando a monitoração com a calibração selecionada…")
+            self.progress.setRange(0, 0)
+            with QSignalBlocker(self.combo_profile):
+                self.combo_profile.setCurrentIndex(self.combo_profile.findData(self._profile))
+            stems = self.current_stems
+            timeline = self.timeline_manager
+            plcs = self.current_placements
+            def build():
+                player = LiveSpatialPlayer(sample_rate=48000, profile=requested)
+                player.set_timeline_manager(timeline)
+                player.set_stems_and_placements(stems, plcs)
+                return player
+            def install(player):
+                cur, playing = self.live_player.current_time_s, self.live_player.is_playing
+                self.live_player.stop()
+                self.live_player = player
+                player.set_output_device(self.combo_audio_dev.currentData())
+                player.set_volume(self.volume.value()/100)
+                player.seek_seconds(cur)
+                if playing:
+                    player.play()
+                self._profile = requested
+                with QSignalBlocker(self.combo_profile):
+                    self.combo_profile.setCurrentIndex(self.combo_profile.findData(requested))
+                self.settings.setValue("monitor/profile", requested)
+                self._preview_ui = None
+                self._end_task("Calibração aplicada ao monitor e à exportação.")
+            self._thread_job(build, install)
         else:
-            export_fmt = ExportFormat.MP4_ATMOS_JOC_714
+            self._profile = requested
+            self.settings.setValue("monitor/profile", requested)
 
-        self.statusBar().showMessage(f"Renderizando e exportando {export_fmt.value} (faixa completa)...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            matrix_714 = self.renderer.render_to_multichannel_714(
-                self.current_stems,
-                self.current_placements,
-                config=RenderConfig(sample_rate=48000, apply_lufs_norm=True),
-                timeline_manager=self.timeline_manager
-            )
-            saved_file = AudioExporter714.export(
-                multichannel_matrix=matrix_714,
-                output_path=file_path,
-                sample_rate=48000,
-                export_format=export_fmt,
-                metadata=self.current_source.metadata if self.current_source else None
-            )
-            QApplication.restoreOverrideCursor()
-            QMessageBox.information(
-                self,
-                "Exportação Concluída",
-                f"Música inteira salva com sucesso em:\n{saved_file}\n\n"
-                f"Formato: {export_fmt.name} ({saved_file.suffix})\n"
-                f"Automação: {len(self.timeline_manager.sections)} trechos processados com transições suaves."
-            )
-            self.statusBar().showMessage("Exportação finalizada com sucesso.")
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Falha na Exportação", f"Erro ao exportar: {e}")
-
-    def _on_play_on_jbl_clicked(self):
-        if not self.current_stems:
-            QMessageBox.warning(self, "Reprodução", "Carregue e monte uma faixa antes de tocar na soundbar.")
+    def _save_arrangement(self) -> None:
+        if not self._dirty or not self.session:
             return
-
-        out_dir = Path.home() / "Music" / "DolbyAtmos"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        dest_file = out_dir / f"{self.lbl_track_title.text()} [Dolby Atmos 7.1.4].mp4".replace("/", "-")
-
-        self.statusBar().showMessage("Renderizando faixa completa em Dolby Atmos 7.1.4 para TV Samsung / JBL Bar 1000...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            matrix_714 = self.renderer.render_to_multichannel_714(
-                self.current_stems,
-                self.current_placements,
-                config=RenderConfig(sample_rate=48000, apply_lufs_norm=True),
-                timeline_manager=self.timeline_manager
-            )
-            saved_file = AudioExporter714.export(
-                multichannel_matrix=matrix_714,
-                output_path=dest_file,
-                sample_rate=48000,
-                export_format=ExportFormat.MP4_ATMOS_JOC_714,
-                metadata=self.current_source.metadata if self.current_source else None
-            )
-            QApplication.restoreOverrideCursor()
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            path = self.session_dir / f"{self.session['hash']}_{self.session['mode']}.json"
+            payload = {"version": 1, "sections": pack_sections(self.timeline_manager.sections),
+                       "preset": self.session["preset"], "intensity": self.session["intensity"], "manual": self._manual}
+            data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf8")
+            save = QSaveFile(str(path))
+            if not save.open(QIODevice.WriteOnly) or save.write(data) != len(data) or not save.commit():
+                raise OSError(save.errorString())
+            self._dirty = False
+        except (OSError, ValueError) as exc:
+            self._notice(f"Falha ao salvar a automação local. {exc}", error=True)
 
-            # Tenta cast via DLNA para a TV Samsung com tela apagada
-            success = self.dlna_bridge.cast_file_to_soundbar(saved_file, auto_picture_off=True)
-            if not success:
-                success = self.directframe_bridge.play_multichannel_file(saved_file)
+    def _on_search_clicked(self) -> None:
+        query, ok = QInputDialog.getText(self, "Buscar música online", "Artista ou faixa")
+        if ok and query.strip():
+            self._start({"action": "search", "query": query.strip()}, "Buscando música online…")
 
-            if success:
-                self.statusBar().showMessage("Reproduzindo na TV Samsung via Wi-Fi (DLNA) -> JBL Bar 1000!")
-                QMessageBox.information(
-                    self,
-                    "Reprodução Wi-Fi Iniciada",
-                    f"A faixa foi salva em:\n{saved_file}\n\n"
-                    f"Comando de transmissão enviado para a TV Samsung!\n"
-                    f"A tela da TV será desligada (KEY_PICTURE_OFF) mantendo o som na JBL Bar 1000."
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "Arquivo Pronto para Wi-Fi",
-                    f"Faixa salva com sucesso em:\n{saved_file}\n\n"
-                    f"O Rygel já disponibilizou a faixa na rede!\n"
-                    f"Abra o BubbleUPnP ou Symfonium no celular (ou na TV Samsung) para tocar via Wi-Fi."
-                )
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Erro de Reprodução", f"Falha ao processar para soundbar: {e}")
+    def _show_search_results(self, results: list[dict]) -> None:
+        if not results:
+            self._notice("A busca online não trouxe resultados. Você também pode abrir um arquivo local.")
+            return
+        labels = [f"{i+1}. {r['artist']} — {r['title']} ({r['format_label']})" for i, r in enumerate(results)]
+        label, ok = QInputDialog.getItem(self, "Resultados da busca", "Selecione uma faixa para baixar",
+                                         labels, 0, False)
+        if ok:
+            self._start({"action": "download", "item": results[labels.index(label)]}, "Baixando a faixa…")
 
-    def closeEvent(self, event):
+    def _default_dest(self, suffix: str) -> Path:
+        root = Path.home() / "Music" / "DolbyAtmos"
+        base = self.session.get("title", "Mixagem").replace("/", "-").strip() or "Mixagem"
+        return root / f"{base[:120]} [7.1.4]{suffix}"
+
+    def _export_dialog(self) -> None:
+        if not self.session:
+            return
+        path, selected = QFileDialog.getSaveFileName(self, "Exportar mixagem", str(self._default_dest(".mp4")),
+                                                     ";;".join(EXPORT_FORMATS))
+        if path and selected in EXPORT_FORMATS:
+            suffix = selected.rsplit("*", 1)[1].rstrip(")")
+            dest = Path(path)
+            if dest.suffix.lower() != suffix:
+                dest = dest.with_suffix(suffix)
+                if dest.exists() and not self._confirm_overwrite(dest):
+                    return
+            self._export(dest, EXPORT_FORMATS[selected])
+
+    def _confirm_overwrite(self, path: Path) -> bool:
+        return QMessageBox.question(self, "Substituir exportação?", f"Já existe um arquivo em {path}. Substituir?",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _quick_export(self, dlna: bool = False) -> None:
+        dest = self._default_dest(".mp4")
+        if not dest.exists() or self._confirm_overwrite(dest):
+            self._export(dest, ExportFormat.MP4_ATMOS_JOC_714, "dlna" if dlna else "")
+
+    def _directframe_export(self) -> None:
+        dest = self._default_dest(".mkv")
+        if not dest.exists() or self._confirm_overwrite(dest):
+            self._export(dest, ExportFormat.MKV_LPCM_714, "hdmi")
+
+    def _export(self, dest: Path, fmt: ExportFormat, delivery: str = "") -> None:
+        if not self.session or self._task:
+            return
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            self._export_stage = tempfile.TemporaryDirectory(prefix=".atmossplit-", dir=dest.parent)
+        except OSError as exc:
+            self._notice(f"Não foi possível criar o arquivo de entrega. {exc}", error=True)
+            return
+        req = self._base_request("export")
+        req.update(hash=self.session["hash"], path=self.session["path"], format=fmt.value, dest=str(dest),
+                   delivery=delivery, staging=str(Path(self._export_stage.name)/dest.name),
+                   sections=pack_sections(self.timeline_manager.sections))
+        self._start(req, "Preparando o render da faixa…")
+
+    def _export_complete(self, result: dict) -> None:
+        dest = Path(self._request["dest"])
+        os.replace(self._request["staging"], dest)
+        delivery = self._request["delivery"]
+        report = result["report"]
+        def measure(key: str, unit: str) -> str:
+            v = report.get(key)
+            return f"{v:.1f} {unit}" if v is not None else "indisponível"
+        summary = (f"Master PCM {measure('integrated_lufs', 'LUFS')}, pico {measure('true_peak_dbtp', 'dBTP')}. "
+                   f"Voz/instrumental {measure('vocal_balance_db', 'dB')}, presença {measure('presence_balance_db', 'dB')}.")
+        if "trim_db" in result["report"]:
+            summary += f" JOC decodificado {measure('decoded_true_peak_dbtp', 'dBTP')}, ajuste {measure('trim_db', 'dB')}."
+        if not delivery:
+            self._end_task(f"Salvo em {dest}. {summary}")
+            return
+        self._task = "delivery"
+        self._sync_enabled()
+        self._notice(f"Arquivo salvo. Conectando o reprodutor… {summary}")
+        def deliver():
+            return (SamsungDLNABridge().cast_file_to_soundbar(dest, auto_picture_off=True)
+                    if delivery == "dlna" else DirectFrameBridge().play_multichannel_file(dest))
+        def delivered(ok: bool):
+            device = "TV via DLNA" if delivery == "dlna" else "DirectFrame / mpv"
+            text = f"Reprodução solicitada em {device}." if ok else f"Não foi possível iniciar {device}."
+            self._end_task(f"{text} Arquivo salvo em {dest}. {summary}", error=not ok)
+        self._thread_job(deliver, delivered)
+
+    def _cache_dialog(self) -> None:
+        if self._task is not None:
+            return
+        self._task = "list-cache"
+        self._cancelled = False
+        self._sync_enabled()
+        self.progress.setRange(0, 0)
+        self._notice("Consultando o cache de stems…")
+        self._thread_job(self.cache_manager.list_cached_tracks, self._show_cache)
+
+    def _show_cache(self, tracks: list[dict]) -> None:
+        self._end_task("Cache de stems disponível.")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Cache de stems")
+        dlg.resize(520, 330)
+        box = QVBoxLayout(dlg)
+        total = sum(t["size_bytes"] for t in tracks) / 1048576
+        box.addWidget(_label(f"{len(tracks)} entradas   /   {total:.1f} MiB", "Heading"))
+        table = QTableWidget(len(tracks), 3)
+        table.setHorizontalHeaderLabels(["Faixa e modo", "Stems", "MiB"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        for i, track in enumerate(tracks):
+            for col, text in enumerate((f"{track['file_hash'][:12]} / {track['mode']}",
+                                        str(track["stems_count"]), str(track["size_mb"]))):
+                table.setItem(i, col, QTableWidgetItem(text))
+        box.addWidget(table)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        clear = buttons.addButton("Limpar faixas fora da sessão" if self.session else "Limpar cache", QDialogButtonBox.DestructiveRole)
+        clear.setEnabled(bool(tracks))
+        clear.clicked.connect(lambda: self._clear_cache(dlg))
+        buttons.rejected.connect(dlg.reject)
+        box.addWidget(buttons)
+        dlg.exec()
+
+    def _clear_cache(self, dlg: QDialog) -> None:
+        if QMessageBox.question(dlg, "Limpar o cache de stems?",
+                                "As próximas aberturas precisarão de uma nova separação. As automações serão mantidas.",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            keep = (self.session["hash"], self.session["mode"]) if self.session else None
+            dlg.accept()
+            self._task = "clear-cache"
+            self._cancelled = False
+            self._sync_enabled()
+            self._notice("Liberando espaço no cache…")
+            self._thread_job(lambda: self.cache_manager.clear_cache(keep=keep),
+                             lambda freed: self._end_task(f"{freed/1048576:.1f} MiB liberados no cache."))
+
+    def _help(self) -> None:
+        QMessageBox.information(self, "Atalhos do estúdio",
+                                "Ctrl+O   Abrir faixa\nEspaço   Ouvir ou pausar\n← / →   Mover cinco segundos\n"
+                                "↑ / ↓   Ajustar altura da fonte\nM / S   Mudo ou solo\nD   Espelhar em estéreo\n"
+                                "0   Centralizar\n1–5   Escolher o estilo da direção\nCtrl+C / Ctrl+V   Copiar e colar fonte\n"
+                                "← / → na trilha de microeventos   Ir ao evento anterior ou seguinte\n"
+                                "Delete   Remover cópia\nCtrl+roda   Zoom na timeline\nRoda na sala   Ajustar altura")
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key_Space:
+            self._toggle_preview()
+        elif key in (Qt.Key_Right, Qt.Key_Left):
+            self._seek_relative(5.0 if key == Qt.Key_Right else -5.0)
+        elif self._task or not self.current_stems:
+            super().keyPressEvent(event)
+            return
+        elif Qt.Key_1 <= key <= Qt.Key_5:
+            self.combo_presets.setCurrentIndex(int(key)-int(Qt.Key_1))
+            self._redirect()
+        elif self._inspector and key in (Qt.Key_M, Qt.Key_S):
+            (self._inspector.btn_mute if key == Qt.Key_M else self._inspector.btn_solo).click()
+        elif key in (Qt.Key_Up, Qt.Key_Down, Qt.Key_0, Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_D) or (
+                key in (Qt.Key_C, Qt.Key_V) and event.modifiers() & Qt.ControlModifier):
+            self.room_view.keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+    def dragEnterEvent(self, event) -> None:
+        if not any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.ignore()
+        elif self._task is not None:
+            self._notice(BUSY_DROP_NOTICE, error=True)
+            event.ignore()
+        else:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        if self._task is not None:
+            self._notice(BUSY_DROP_NOTICE, error=True)
+            event.ignore()
+            return
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and Path(url.toLocalFile()).is_file():
+                self._load_and_process_audio_path(url.toLocalFile())
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def closeEvent(self, event) -> None:
         self.ui_poll_timer.stop()
-        self._cancel_separation_task()
+        self.save_timer.stop()
+        self._save_arrangement()
         self.live_player.stop()
+        self._closing = True
+        if self._proc or self._thread or self._device_scan:
+            self._cancel()
+            event.ignore()
+            return
         super().closeEvent(event)
 
 
-def run_app():
+def run_app() -> int:
     if sys.platform == "linux":
         os.environ.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
-        os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-
     app = QApplication(sys.argv)
     app.setApplicationName("AtmosSplit")
-
-    icon_path = Path(__file__).resolve().parent.parent.parent / "assets" / "icon.png"
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
-
+    _immunize_cpython_none_refcount()
     window = MainWindow()
     window.show()
+    if len(sys.argv) > 1:
+        path = next((Path(a) for a in sys.argv[1:] if Path(a).is_file()), None)
+        if path:
+            QTimer.singleShot(0, lambda: window._load_and_process_audio_path(str(path)))
     return app.exec()
 
 

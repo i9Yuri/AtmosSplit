@@ -23,6 +23,7 @@ class BinauralHRTFEngine:
         self.head_radius = head_radius_m
         self.channel_profiles: List[Dict[str, Any]] = []
         self._filter_states: Dict[str, Any] = {}
+        self._delays: dict[int, np.ndarray] = {}
         self._init_speaker_filters()
 
     def _init_speaker_filters(self):
@@ -51,8 +52,12 @@ class BinauralHRTFEngine:
             phi_rad = math.atan2(spk.z, math.sqrt(spk.x**2 + spk.y**2)) # Elevação
 
             # 1. Atraso Interaural (ITD) - Modelo Woodworth
-            itd_s = (self.head_radius / self.c) * (math.sin(abs(theta_rad)) + abs(theta_rad))
+            angle = min(abs(theta_rad), math.pi - abs(theta_rad))
+            itd_s = (self.head_radius / self.c) * (math.sin(angle) + angle)
             itd_samples = int(round(itd_s * self.sample_rate))
+
+            if itd_samples:
+                self._delays[idx] = np.zeros(itd_samples, dtype="f")
 
             # 2. Diferença de Nível (IID) - Atenuação de cabeça
             pan_lr = (math.sin(theta_rad) + 1.0) / 2.0  # 0.0 (Esq) a 1.0 (Dir)
@@ -61,9 +66,9 @@ class BinauralHRTFEngine:
 
             # 3. Filtro de Elevação de Teto (Drivers superiores de teto)
             sos_elevation = None
-            if spk.z > 0.5:
+            if spk.z > 0.5 and self.sample_rate > 15556:
                 # Som de teto: boost de brilho aéreo em ~9 kHz
-                sos_elevation = signal.butter(2, [7000.0, 11000.0], btype="bandpass", fs=self.sample_rate, output="sos")
+                sos_elevation = signal.butter(2, [7000.0, min(11000., self.sample_rate*.46)], btype="bandpass", fs=self.sample_rate, output="sos")
                 zi_elev = signal.sosfilt_zi(sos_elevation)
                 self._filter_states[f"elev_{idx}"] = np.zeros_like(zi_elev)
 
@@ -80,6 +85,8 @@ class BinauralHRTFEngine:
 
     def reset_states(self):
         """Zera os estados dos filtros para transição suave em pausas e seeks."""
+        for line in self._delays.values():
+            line.fill(0.)
         for k in self._filter_states:
             self._filter_states[k].fill(0.0)
 
@@ -110,8 +117,6 @@ class BinauralHRTFEngine:
                 stereo_out[:, 1] += scaled_lfe
                 continue
 
-            if np.max(np.abs(ch_data)) < 1e-6:
-                continue
 
             # Processamento espacial
             gain_l = prof["gain_l"]
@@ -131,21 +136,14 @@ class BinauralHRTFEngine:
                     elevation_boost = signal.sosfilt(prof["sos_elevation"], ch_data)
                 sig_processed = ch_data + elevation_boost * 0.4
 
-            # Canal Esquerdo com ITD
-            if delay_l > 0 and delay_l < num_samples:
-                stereo_out[delay_l:, 0] += sig_processed[:-delay_l] * gain_l
-            else:
-                stereo_out[:, 0] += sig_processed * gain_l
-
-            # Canal Direito com ITD
-            if delay_r > 0 and delay_r < num_samples:
-                stereo_out[delay_r:, 1] += sig_processed[:-delay_r] * gain_r
-            else:
-                stereo_out[:, 1] += sig_processed * gain_r
-
-        # Normalização suave anti-clipping
-        peak = float(np.max(np.abs(stereo_out)))
-        if peak > 0.95:
-            stereo_out = (stereo_out / peak) * 0.95
-
+            delayed = sig_processed
+            if delay_l or delay_r:
+                history = self._delays[ch_idx]
+                previous = history if keep_state else np.zeros_like(history)
+                line = np.concatenate((previous, sig_processed))
+                delayed = line[:num_samples]
+                if keep_state:
+                    history[:] = line[-len(history):]
+            stereo_out[:, 0] += (delayed if delay_l else sig_processed)*gain_l
+            stereo_out[:, 1] += (delayed if delay_r else sig_processed)*gain_r
         return stereo_out

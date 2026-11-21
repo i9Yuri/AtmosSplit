@@ -6,7 +6,7 @@ Suporta espelhamento estéreo (is_stereo) para pratos, ambiências e harmonias b
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Optional
 from enum import Enum
 
@@ -59,8 +59,8 @@ class AutoAtmosDirector:
 
             # 1. Voz Principal (Lead Vocal) — Regra de Ouro da Indústria:
             # Ancoragem firme no canal central frontal (Center Channel) para máxima inteligibilidade e foco
-            is_lead_vocal = "lead" in name_lower or (("vocal" in name_lower or "voice" in name_lower) and "back" not in name_lower and "choir" not in name_lower and p.stereo_width_ratio < 0.35)
-            is_backing_vocal = "back" in name_lower or "choir" in name_lower or ("vocal" in name_lower and p.stereo_width_ratio >= 0.35)
+            is_lead_vocal = "lead" in name_lower or (("vocal" in name_lower or "voice" in name_lower) and "back" not in name_lower and "choir" not in name_lower)
+            is_backing_vocal = "back" in name_lower or "choir" in name_lower
 
             if is_lead_vocal:
                 x = 0.0        # Ponto focal frontal absoluto (Center)
@@ -91,7 +91,7 @@ class AutoAtmosDirector:
                 is_stereo = False
 
             # 4. Sub-Grave puro ou faixas com predominância sub-bass
-            elif "sub" in name_lower or (p.sub_bass_energy_ratio > 0.45 and "air" not in name_lower and not is_lead_vocal and not is_backing_vocal):
+            elif "sub" in name_lower:
                 x = 0.0
                 y = 0.55
                 z = 0.0
@@ -139,7 +139,7 @@ class AutoAtmosDirector:
 
             # 9. Guitarras / Cordas / Teclados
             # ESPELHADO: Balanço estéreo natural do palco estendido
-            elif "guitar" in name_lower or "key" in name_lower or "piano" in name_lower:
+            elif any(role in name_lower for role in ("other", "synth", "guitar", "key", "piano")):
                 x = 0.60       # Espelhado: -0.60 e +0.60
                 y = 0.20
                 z = 0.25
@@ -226,3 +226,33 @@ class AutoAtmosDirector:
             )
 
         return placements
+
+    @staticmethod
+    def direct_section(base: dict[str, SpatialPlacement], kind: str,
+                       intensity: float) -> dict[str, SpatialPlacement]:
+        """Deslocamentos relativos ao preset. O centro vocal continua editável pelo operador."""
+        opening = {"intro": -.25, "verse": -.50, "buildup": .28, "chorus": .78,
+                   "climax": 1., "bridge": -.18, "breakdown": -.65, "solo": -.3,
+                   "outro": .30}.get(kind, 0.) * max(0., min(1., float(intensity)))
+        out = {}
+        for name, placement in base.items():
+            p = replace(placement)
+            if name in ("lead_vocal", "vocals", "voice"):
+                p.x, p.y, p.z, p.spread = 0., 1., 0., .05
+                p.volume_gain *= 1 + .035*opening
+            elif p.is_stereo:
+                p.x = max(.15, min(1., abs(p.x) + .23*opening))
+                p.y = max(-1., min(1., p.y - .62*opening))
+                p.z = max(0., min(1., p.z + .34*opening))
+                p.spread = max(.04, min(1., p.spread + .28*opening))
+                p.volume_gain *= 1 - .04*opening
+                if kind in ("outro", "breakdown") and ("air" in name or "back" in name):
+                    p.z += (1-p.z)*abs(opening)
+                if kind == "solo" and name in ("guitar_keys", "other"):
+                    p.y += (1-p.y)*abs(opening)
+                    p.volume_gain *= 1 + .25*abs(opening)
+            elif p.lfe_send:
+                p.lfe_send = max(0., min(1., p.lfe_send*(.86+.14*opening)))
+                p.volume_gain *= 1 + .07*opening
+            out[name] = p
+        return out
